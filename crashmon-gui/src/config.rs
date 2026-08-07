@@ -27,17 +27,25 @@ pub fn state_dir() -> PathBuf {
 }
 
 /// Stellt sicher, dass state_dir + config.toml existieren.
-/// Liefert den Config-Pfad. Config wird nur bei Fehlen geschrieben
-/// (format!, kein toml-Dep noetig — zwei Felder, deterministisch).
+/// Liefert den Config-Pfad. Config wird nur bei Fehlen geschrieben.
+///
+/// k10-Fix: serialisiert per toml-Crate statt `format!("{:?}")` — Rusts
+/// Debug-Escaping ist kein TOML-Escaping (`\u{…}` ist ungueltig); ein
+/// Pfad mit exotischen Zeichen erzeugte eine Config, die der Daemon
+/// nicht mehr lesen konnte.
 pub fn ensure_default_config(state_dir: &Path) -> io::Result<PathBuf> {
     std::fs::create_dir_all(state_dir)?;
     let config_path = state_dir.join("config.toml");
     if !config_path.exists() {
+        let mut table = toml::map::Map::new();
+        table.insert(
+            "dump_dir".into(),
+            toml::Value::String(state_dir.display().to_string()),
+        );
+        table.insert("log_level".into(), toml::Value::String("info".into()));
         let content = format!(
-            "# crashmon Konfiguration (von crashmon-gui erzeugt)\n\
-             dump_dir = {:?}\n\
-             log_level = \"info\"\n",
-            state_dir.display().to_string()
+            "# crashmon Konfiguration (von crashmon-gui erzeugt)\n{}",
+            toml::Value::Table(table)
         );
         std::fs::write(&config_path, content)?;
     }

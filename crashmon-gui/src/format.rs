@@ -37,6 +37,44 @@ pub fn format_ts(ts_us: u64) -> String {
     )
 }
 
+/// Relative Zeit (D3): "gerade eben", "vor 2 Min", "vor 3 Std", "vor 5 Tagen"
+/// — die Liste soll nicht mit vollen UTC-Stempeln konkurrieren.
+pub fn relative_ago(ts_us: u64, now_us: u64) -> String {
+    let diff = now_us.saturating_sub(ts_us) / 1_000_000; // Sekunden
+    if diff < 10 {
+        "gerade eben".into()
+    } else if diff < 60 {
+        format!("vor {diff} Sek")
+    } else if diff < 3600 {
+        format!("vor {} Min", diff / 60)
+    } else if diff < 86_400 {
+        format!("vor {} Std", diff / 3600)
+    } else {
+        format!("vor {} Tagen", diff / 86_400)
+    }
+}
+
+/// Lokalzeit (D3): UTC im Report-JSON ist richtig, UTC in der Oberflaeche
+/// ist Zumutung — Offset aus libc::localtime_r (kein chrono noetig).
+pub fn format_ts_local(ts_us: u64) -> String {
+    let secs = (ts_us / 1_000_000) as libc::time_t;
+    // SAFETY: localtime_r schreibt in unser zeroed tm, kein Globals-Zustand.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::localtime_r(&secs, &mut tm) };
+    if ret.is_null() {
+        return format_ts(ts_us); // Fallback: UTC-Formatierung
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
 /// Kurzzeile fuer die Report-Liste, z. B. "Coredump SIGSEGV: app (pid 42)".
 pub fn summarize(report: &Report) -> String {
     let detail = match &report.cause.kind {
@@ -52,7 +90,7 @@ pub fn summarize(report: &Report) -> String {
             None => format!("Xid {code}"),
         },
         EventKind::GpuReset { vendor, .. } => format!("GPU Reset ({vendor})"),
-        EventKind::GpuWedged { method } => match method {
+        EventKind::GpuWedged { method, .. } => match method {
             Some(m) => format!("GPU Wedged ({m})"),
             None => "GPU Wedged".into(),
         },
@@ -146,5 +184,28 @@ mod tests {
             comm: "app".into(),
         });
         assert_eq!(summarize(&r), "OOM-Kill app (pid 7)");
+    }
+
+    #[test]
+    fn relative_ago_steps() {
+        let now = 1_000_000_000_000_000u64; // willkuerliche Basis
+        assert_eq!(relative_ago(now, now), "gerade eben");
+        assert_eq!(relative_ago(now - 5_000_000, now), "gerade eben");
+        assert_eq!(relative_ago(now - 30_000_000, now), "vor 30 Sek");
+        assert_eq!(relative_ago(now - 120_000_000, now), "vor 2 Min");
+        assert_eq!(relative_ago(now - 3 * 3600_000_000, now), "vor 3 Std");
+        assert_eq!(relative_ago(now - 5 * 86_400_000_000, now), "vor 5 Tagen");
+        // Zukunft (Uhr driftet): saturating -> "gerade eben"
+        assert_eq!(relative_ago(now + 60_000_000, now), "gerade eben");
+    }
+
+    #[test]
+    fn format_ts_local_matches_utc_when_zone_is_utc() {
+        // In UTC-Umgebung sind local und utc identisch; das Format ist
+        // "YYYY-MM-DD HH:MM:SS" ohne UTC-Suffix (D3: Lokalzeit).
+        let s = format_ts_local(946_684_800_000_000); // 2000-01-01 00:00:00 UTC
+        assert_eq!(s.len(), 19, "Format: {s}");
+        assert!(s.starts_with("2000-01-01 "), "{s}");
+        assert!(!s.contains("UTC"), "kein UTC-Suffix: {s}");
     }
 }

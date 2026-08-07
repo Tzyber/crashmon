@@ -14,7 +14,8 @@ eframe = "=0.36.1"
 egui = "=0.36.1"
 libc = "=0.2.189"
 serde_json = "=1.0.151"
-ureq = "=3.3.0"
+# k10: ensure_default_config schreibt TOML korrekt escaped (statt format!{:?})
+toml = "=1.1.4"
 
 [dev-dependencies]
 egui_kittest = "=0.36.1"

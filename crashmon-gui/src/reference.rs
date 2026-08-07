@@ -7,31 +7,11 @@
 
 use crash_daemon::event::EventKind;
 
-/// Xid-Code -> (Severity, Beschreibung). Quelle: recherche-phase1.md 2.2.
+/// Xid-Code -> (Severity, Beschreibung). EINE Quelle (W6-Fix):
+/// crash_daemon::gpu::matcher::xid_info ist die Wahrheit — hier wird nur
+/// delegiert, keine eigene Tabelle mehr (die drei Listen drifteten auseinander).
 pub fn xid_info(code: u16) -> (String, &'static str) {
-    let severity = match code {
-        13 | 31 | 43 | 45 => "hoch",
-        62 => "kritisch",
-        79 => "fatal",
-        _ => "unbekannt",
-    };
-    let desc = match code {
-        13 => {
-            "Graphics Engine Exception — GPU-Engine meldet einen Fehler; haeufig nach Treiber-/Speicherproblemen."
-        }
-        31 => {
-            "Illegal memory access — Kernel/App greift auf ungueltigen GPU-Speicher zu; haeufigste Xid-Ursache."
-        }
-        43 => "GPU stopped processing — GPU haelt an; oft Folgexid nach Xid 31.",
-        45 => "Preemptive cleanup — Treiber raeumt nach einem Fehler auf; oft Folgexid.",
-        62 => {
-            "Internal micro-controller halt — der GPU-Controller haelt an; kritisch, oft Hardware-Defekt."
-        }
-        79 => {
-            "GPU has fallen off the bus — GPU wird vom PCIe-Bus getrennt; fatal, haeufig Hardware/Stromversorgung."
-        }
-        _ => "Unbekannter Xid-Code — Details in der NVIDIA-Dokumentation pruefen.",
-    };
+    let (severity, desc) = crash_daemon::gpu::matcher::xid_info(code);
     (severity.to_string(), desc)
 }
 
@@ -158,7 +138,10 @@ mod tests {
                 vendor: "amdgpu".into(),
                 detail: "x".into(),
             },
-            EventKind::GpuWedged { method: None },
+            EventKind::GpuWedged {
+                method: None,
+                device: None,
+            },
         ];
         for kind in kinds {
             assert!(!event_explanation(&kind).is_empty());

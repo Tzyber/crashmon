@@ -109,17 +109,17 @@ pub fn find_in_path(name: &str, path_var: Option<&str>) -> Option<PathBuf> {
 }
 
 /// Daemon-Binary: Sibling von current_exe (Dev: shared target-dir),
-/// Fallback PATH-Suche.
+/// Fallback PATH-Suche. Sucht "crashmon" (k2: Binary-Name == Unit-Name).
 pub fn find_daemon_bin() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let sibling = dir.join("crash-daemon");
+        let sibling = dir.join("crashmon");
         if sibling.is_file() {
             return Some(sibling);
         }
     }
-    find_in_path("crash-daemon", std::env::var("PATH").ok().as_deref())
+    find_in_path("crashmon", std::env::var("PATH").ok().as_deref())
 }
 
 /// Startet den Daemon: stdout/stderr in Log-Datei (NIE Pipe -> kein

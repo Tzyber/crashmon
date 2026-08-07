@@ -11,6 +11,8 @@ pub struct LogTail {
     cursor: u64,
     lines: VecDeque<String>,
     max: usize,
+    /// Angebrochene letzte Zeile (ohne `\n`), wartet auf den Abschluss (k5).
+    partial: String,
 }
 
 impl LogTail {
@@ -19,6 +21,7 @@ impl LogTail {
             cursor: 0,
             lines: VecDeque::with_capacity(max),
             max,
+            partial: String::new(),
         }
     }
 
@@ -34,16 +37,39 @@ impl LogTail {
             // Rotation: von vorne
             self.cursor = 0;
             self.lines.clear();
+            self.partial.clear();
         }
         if file.seek(SeekFrom::Start(self.cursor)).is_err() {
             return;
         }
-        let mut buf = String::new();
-        if file.read_to_string(&mut buf).is_err() {
+        let mut buf = Vec::new();
+        if file.read_to_end(&mut buf).is_err() {
             return;
         }
-        self.cursor += buf.len() as u64;
-        for line in buf.lines() {
+        let consumed = buf.len() as u64;
+
+        // k5: lossy statt read_to_string — eine Nicht-UTF-8-Zeile darf den
+        // Tail nicht dauerhaft einfrieren (frueher: Err ohne Cursor-Vorschub
+        // -> dieselbe Stelle scheiterte bei jedem Poll).
+        //
+        // Angebrochene letzte Zeile: erst uebernehmen, wenn das `\n` da ist —
+        // sonst wird sie beim naechsten Append als eigene Zeile verdoppelt.
+        // Split auf den ROH-Bytes: die lossy-Ersatzzeichen (3 Bytes) wuerden
+        // die Laengenrechnung verschieben (u64-Underflow).
+        let Some(idx) = buf.iter().rposition(|&b| b == b'\n') else {
+            // gar kein Zeilenende im Stueck: alles zuruecksetzen, Text
+            // sammelt sich im partial-Puffer.
+            self.cursor = self.cursor.saturating_sub(consumed);
+            self.partial.push_str(&String::from_utf8_lossy(&buf));
+            return;
+        };
+        // Cursor steht wieder am Anfang der halben Zeile (wird beim
+        // naechsten Refresh komplett gelesen).
+        let partial_len = (buf.len() - idx - 1) as u64;
+        self.cursor = self.cursor + consumed - partial_len;
+        self.partial
+            .push_str(&String::from_utf8_lossy(&buf[..=idx]));
+        for line in std::mem::take(&mut self.partial).lines() {
             self.lines.push_back(line.to_owned());
             while self.lines.len() > self.max {
                 self.lines.pop_front();
@@ -130,5 +156,54 @@ mod tests {
         let mut tail = LogTail::new(10);
         tail.refresh(Path::new("/nonexistent-crashmon.log"));
         assert_eq!(tail.lines().count(), 0);
+    }
+
+    #[test]
+    fn partial_line_waits_for_newline() {
+        // k5: "partial" ohne \n wird NICHT als Zeile uebernommen; erst mit
+        // dem naechsten Append (der die Zeile abschliesst) erscheint sie —
+        // unverdoppelt.
+        let path = temp_file("partial");
+        fs::write(&path, "zeile1\nangebrochen").unwrap();
+        let mut tail = LogTail::new(100);
+        tail.refresh(&path);
+        assert_eq!(
+            tail.lines().collect::<Vec<_>>(),
+            vec!["zeile1"],
+            "halbe Zeile bleibt unsichtbar"
+        );
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(file, "e Ende\nzeile3\n").unwrap();
+        tail.refresh(&path);
+        assert_eq!(
+            tail.lines().collect::<Vec<_>>(),
+            vec!["zeile1", "angebrochene Ende", "zeile3"]
+        );
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn non_utf8_does_not_freeze_tail() {
+        // k5: Nicht-UTF-8 (z. B. Debug-Binärspucke) darf den Tail nicht
+        // dauerhaft stoppen — lossy-Umwandlung, Cursor schreitet voran.
+        let path = temp_file("nonutf8");
+        fs::write(&path, [b'a', b'b', b'\n', 0xFF, 0xFE]).unwrap();
+        let mut tail = LogTail::new(100);
+        tail.refresh(&path);
+        assert_eq!(tail.lines().count(), 1, "erste Zeile kam durch");
+
+        // Weiteres Append wird trotzdem gelesen (Cursor ist nicht eingefroren)
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        writeln!(file, "ok").unwrap();
+        tail.refresh(&path);
+        assert!(
+            tail.lines().any(|l| l.ends_with("ok")),
+            "Tail liest weiter: {:?}",
+            tail.lines().collect::<Vec<_>>()
+        );
+        fs::remove_file(&path).ok();
     }
 }

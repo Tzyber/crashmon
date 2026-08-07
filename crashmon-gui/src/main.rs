@@ -6,7 +6,6 @@
 
 mod app;
 mod config;
-mod fetch;
 mod format;
 mod logtail;
 mod reference;
