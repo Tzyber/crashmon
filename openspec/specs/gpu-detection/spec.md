@@ -55,3 +55,21 @@ Fehlende GPU-Knoten/Pfade: Daemon laeuft weiter, nur `tracing::warn`, kein Abstu
 - **Test:** Code-Review
 
 Kein ACTION=add/remove-Monitoring, kein `Hotplug`-Event — ausserhalb des Ziels (YAGNI). Nur `WEDGED=` (+ `ACTION=change` als Kontext).
+
+### GD-INV-4: Vendor ohne Doppelpunkt (B2-Fix)
+- **Enforced:** false
+- **Test:** `tests/fixtures/kernel_lines.txt` (echte Zeilen aus Bugreports)
+
+Vendor-Match ueber den Treiber-Namen (`amdgpu`, `i915`, `xe `), NICHT ueber
+`amdgpu:` — die echte Kernelzeile ist `[drm:amdgpu_job_timedout [amdgpu]]
+*ERROR* ring ... timeout`. Ring-Timeouts (inkl. soft-recovered) werden als
+GpuReset erkannt. Fixtures muessen belegbare Herkunft haben.
+
+### GD-INV-5: Wedged nur mit Treiber-Kontext (k7) + Kernel-Absender (W3)
+- **Enforced:** false
+- **Test:** `tests/matcher_test.rs` (k7-Negativfall), Code-Review uevent.rs (W3)
+
+`wedged`-Match verlangt drm/xe/amdgpu/i915-Kontext und schneidet die
+PCI-ID des Devices mit. Netlink-Uevents: `recvmsg` prueft den Absender
+(`nl_pid == 0` und Multicast-Gruppe) — Unicast von lokalen Prozessen wird
+verworfen (Spoofing-Guard wie libudev).

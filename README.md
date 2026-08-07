@@ -8,9 +8,10 @@ Was heißt das? Wer war das? Und was macht man jetzt?
 
 crashmon beantwortet das automatisch. Es überwacht das System passiv
 (~0 % Idle-CPU), erkennt Crashes, GPU-Hänger und OOM-Kills, bündelt sie zu
-einem verständlichen Report und erklärt dir, was passiert ist. Und wenn
-etwas **Neues** auftaucht, das noch niemand erklärt hat: Es schlägt selbst
-nach und lernt daraus: deine Wissensdatenbank wächst mit jedem Fehler.
+einem verständlichen Report und erklärt dir, was passiert ist. Neue
+Crashes meldet es per Desktop-Notification — und bei unbekannten Fehlern
+öffnet ein Knopf die vorformulierte Suche im Browser, damit deine
+Wissensdatenbank mit jedem Fehler wächst.
 
 ## Die Idee dahinter
 
@@ -21,9 +22,9 @@ bedeutet. Statt jedes Mal zu googeln, soll das System selbst sprechen:
 
 - **Erfassen**: was ist passiert? (Coredump, OOM, GPU-Reset, Xid, Wedged)
 - **Verstehen**: was bedeutet das? (eingebaute Referenz + Wissensspeicher)
-- **Lernen**: unbekannte Fehler werden nachgeschlagen und in die eigene
-  Wissensdatenbank übernommen; Community-Beiträge sind später per
-  Pull-Request gegen die Repo-Wissensdatei möglich
+- **Lernen**: unbekannte Fehler per Knopf im Browser nachschlagen und
+  selbst in die Wissensdatei übernehmen; Community-Beiträge per
+  Pull-Request gegen die Repo-Wissensdatei (Format: CONTRIBUTING.md)
 
 ## Was es kann
 
@@ -35,9 +36,10 @@ bedeutet. Statt jedes Mal zu googeln, soll das System selbst sprechen:
   Live-Report-Liste, formatierte Detail-Ansicht, Daemon-Log, JSON-Kopieren
 - **Wissensbasis**: eingebaute Referenz (Xid-Codes, Signale, typische
   Meldungen) + lokaler, editierbarer Wissensspeicher (`knowledge.md`), der
-  sich automatisch um neue Vorlagen-Sektionen erweitert und bei unbekannten
-  Fehlern selbst nachschlägt (automatisches Nachschlagen über die
-  DuckDuckGo-API)
+  sich automatisch um neue Vorlagen-Sektionen erweitert; unbekannte Fehler
+  werden per „Im Browser suchen"-Knopf nachgeschlagen (kein automatischer
+  Netzwerkverkehr)
+- **Desktop-Notification** bei neuem Report (`notify-send`)
 
 ## Schnellstart
 
@@ -48,18 +50,21 @@ cargo build --release
 # 1) GUI starten:
 cargo run --release -p crashmon-gui
 
-# 2) Im Fenster: „▶ Daemon starten"
+# 2) Im Fenster: „Daemon starten"
 # 3) Einen Crash erzeugen (zweites Terminal):
 ulimit -c unlimited
 sh -c 'kill -SEGV $$'
-# 4) Nach wenigen Sekunden erscheint der Report live in der Liste
+# 4) Nach wenigen Sekunden erscheint der Report live in der Liste (+ Notification)
 ```
 
 Ohne GUI (Daemon direkt):
 
 ```sh
-cargo run --release -- --config config.example.toml --dump-dir /tmp/crashmon
+cargo run --release --bin crashmon -- --config config.example.toml --dump-dir /tmp/crashmon
 ```
+
+Zwei Daemon-Instanzen auf demselben `dump_dir` sind durch `flock`
+(`.lock`) ausgeschlossen — die zweite bricht mit klarer Meldung ab.
 
 Alle Daten liegen unter `~/.local/share/crashmon/`:
 `crash-<ts>.json` (Reports), `config.toml`, `crashmon-daemon.log`,
@@ -83,36 +88,43 @@ Uevents (Netlink, WEDGED) ──────────────────
 
 - **Journal** wird über den sd-journal-FD gelesen (epoll-Park, kein Polling);
   Cursor-Persistenz überlebt Neustarts, periodisches Re-Open heilt
-  Journal-Rotationen
-- **GUI** zeigt die Reports formatiert (nicht rohes JSON) mit Referenz
-- **Automatisches Nachschlagen**: unbekannter Xid-Code → DuckDuckGo-Abfrage
-  (einmalig pro Code, Hintergrund-Thread) → Ergebnis + Quelle wird an
-  `knowledge.md` angehängt (markiert als „Auto-gelernt")
+  Journal-Rotationen; ein amdgpu-Hang mit 20–50 Kernelzeilen wird in einem
+  Rutsch abgearbeitet (Budget + `yield_now`, kein 2-Einträge-pro-Minute-Tröpfeln)
+- **GUI** zeigt die Reports formatiert (nicht rohes JSON) mit Referenz;
+  Scan/Lesefestplatte sind entprellt (500 ms) und parsen bekannte Reports
+  gar nicht erst neu
+- **Im Browser suchen**: unbekannter Xid-Code → `xdg-open` mit
+  vorformulierter Suche; du entscheidest, was in `knowledge.md` wandert
 
 ## GUI im Detail
 
 | Bereich | Funktion |
 |---|---|
-| Kopf | Daemon starten/stoppen (SIGTERM = sauberer Shutdown mit Drain+Flush), Status |
-| Links | Report-Liste (neueste oben, -Badge, Auto-Select) |
-| Mitte | Detail: Event-Felder,  JSON kopieren, Referenz (Severity + Erklärung), Wissensspeicher (klappbar) |
-| Unten | Daemon-Log (live, Tail) |
+| Kopf | Daemon starten/stoppen (SIGTERM = sauberer Shutdown mit Drain+Flush), Log + Wissensspeicher umschalten |
+| Links | Report-Liste (neueste oben, Severity-Punkt, „vor X Min", Filter), Rechtsklick löscht einen Report |
+| Mitte | Detail: Event-Felder (Grid), JSON kopieren, Referenz (Severity + Erklärung, farbig), „Im Browser suchen" bei unbekannten Xids |
+| Unten | Status-Leiste (immer sichtbar); Daemon-Log aufklappbar |
+| Extra | Wissensspeicher in eigenem Fenster („Neu laden" bei externer Bearbeitung) |
 
 Fenster schließen bei laufendem Daemon → Daemon wird sauber mitbeendet
-(kein Waisen-Prozess). Vulkan-Warnung (`radv is not a conformant...`) beim
-Start ist auf AMD normal und harmlos.
+(kein Waisen-Prozess); die Fenstergröße wird gemerkt. Neue Reports lösen
+eine Desktop-Notification aus (via `notify-send`, sonst still deaktiviert).
+Vulkan-Warnung (`radv is not a conformant...`) beim Start ist auf AMD
+normal und harmlos.
 
-## Wissensspeicher & automatisches Nachschlagen
+## Wissensspeicher & Nachschlagen
 
 - **Repo-Vorlage** `crashmon-gui/knowledge.md`: versionierbar, editierbar;
   beim Bauen eingebettet
 - **Laufzeit-Instanz** `~/.local/share/crashmon/knowledge.md`: deine
-  Einträge + nachgeschlagene Ergebnisse; wird **nie überschrieben**, aber
-  automatisch um fehlende Vorlagen-Sektionen **erweitert** (Merge bei
-  jedem Start)
+  Einträge; wird **nie überschrieben**, aber automatisch um fehlende
+  Vorlagen-Sektionen **erweitert** (Merge beim Start / „Neu laden")
 - Neue Xid-Codes, Signale, Meldungen einfach selbst eintragen, die GUI
   zeigt sie sofort
+- Bei unbekannten Xids: „Im Browser suchen" (vorformulierte Query, kein
+  automatischer Netzwerkverkehr aus der App)
 - Community: Inhalte per Pull-Request gegen die Repo-Datei teilen
+  (Format-Regeln: CONTRIBUTING.md)
 
 ## Testrezepte (Verifikation)
 
@@ -169,12 +181,16 @@ durch Kanal-Überlauf seit Start.
 ## Build & Test
 
 ```sh
-cargo build          # Daemon (Workspace-Default)
+cargo build          # Daemon (Binary: crashmon; Workspace-Default)
 cargo build -p crashmon-gui
-cargo test           # Daemon-Tests (69)
-cargo test -p crashmon-gui   # GUI-Tests (37, headless inkl. Klick-Smoke)
+cargo test           # Daemon-Tests
+cargo test -p crashmon-gui   # GUI-Tests (headless inkl. Klick-Smoke)
 cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
+
+Toolchain ist in `rust-toolchain.toml` gepinnt (1.95.0, MSRV des
+Workspace — egui/eframe 0.36 verlangt >= 1.95).
 
 Host-Tests (brauchen echtes Journal + systemd-coredump):
 ```sh
@@ -193,7 +209,7 @@ src/                  Daemon (lib + Binary)
   output.rs           JSON-Report-Writer (atomar)
 crashmon-gui/         GUI (egui/eframe, eigenes Workspace-Crate)
   src/                app, state (Prozess-Lifecycle), scan, format,
-                      reference (Wissensbasis), fetch (Auto-Learning)
+                      logtail, reference (Wissensbasis)
   knowledge.md        Wissensspeicher-Vorlage (versionierbar)
 systemd/              Gehärtete Service-Unit
 openspec/specs/       Capability-Spezifikationen (SDD)
@@ -218,8 +234,9 @@ veraltet. Geplante/regelmäßige Arbeit:
 
 - systemd-coredump kann den Journal-Eintrag eines Crashes lastabhängig um
   10–20 s verzögern; Reports erscheinen entsprechend später
-- Das automatische Nachschlagen nutzt die DuckDuckGo-Instant-Answer-API;
-  für sehr spezielle Fehler liefert sie oft nichts; dann hilft ein
-  eigener Eintrag in `knowledge.md`
+- Desktop-Notifications brauchen `notify-send` (libnotify); ohne das Tool
+  ist nur die GUI die Benachrichtigung
 - Unbekannte Xid-Codes ohne gesicherte Quelle werden bewusst nicht
-  erraten; sie bleiben dem Nachschlagen oder dir überlassen
+  erraten; sie bleiben dem Browser-Nachschlagen oder dir überlassen
+- Die GUI hat noch keinen Tray-/Hintergrund-Modus: Fenster schließen
+  beendet den Daemon mit (geplant: Fenster verstecken + Tray-Icon)

@@ -10,7 +10,7 @@ Persistenz der Crash-Reports als strukturierte JSON-Dateien.
 - **Enforced:** false
 - **Test:** `tests/output_test.rs` (temp+rename, kein Halbzustand)
 
-Schreiben via temp-Datei + `rename()` in `--dump-dir`; `ts` = UTC-µs im Dateinamen und Report.
+Schreiben via temp-Datei + `rename()` in `--dump-dir`; `ts` = UTC-µs im Dateinamen und Report. W5: `sync_all` vor `rename` + Verzeichnis-sync (best-effort) — die Sichtbarkeits-Atomizitaet von `rename` ist nicht Haltbarkeit; ein Stromausfall darf keinen leeren Report-Namen hinterlassen.
 
 ### OU-2: Vollstaendiger Report-Inhalt
 - **Entities:** CrashReport
@@ -37,3 +37,13 @@ Felder: Event-Kind, ts, exe/comm/pid/signal (Coredump), Xid-Code/PID-Korrelation
 - **Test:** Shutdown-Test
 
 Laufende Reports werden vor Exit fertig geschrieben (Drain mit Timeout, `TimeoutStopSec=10`).
+
+### OU-3: Retention (k4)
+- **Entities:** `crash-<ts>.json`, Config `max_reports`/`max_age_days`
+- **Priority:** P2
+- **Enforced:** false
+- **Test:** `tests/output_test.rs` (prune haelt juengste / entfernt aeltere)
+
+Nach jedem Report-Write prueft der Aggregator die Grenzen und loescht alte
+Dateien (best-effort, Fehler nur geloggt). Ohne Limits waechst das
+Verzeichnis unbegrenzt.

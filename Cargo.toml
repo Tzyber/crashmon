@@ -3,6 +3,13 @@ name = "crash-daemon"
 version = "0.1.0"
 edition = "2024"
 
+# k2-Fix: Binary heisst "crashmon" (systemd-Unit: ExecStart=/usr/bin/crashmon,
+# README-Quickstart, find_daemon_bin der GUI). Der Package-Name bleibt
+# "crash-daemon" — die Lib heisst crash_daemon, GUI-Import unveraendert.
+[[bin]]
+name = "crashmon"
+path = "src/main.rs"
+
 # GUI als separates Workspace-Member-Crate: eframe zieht ~200 Crates —
 # default-members haelt plain `cargo build`/`cargo test` im Root beim Daemon.
 [workspace]

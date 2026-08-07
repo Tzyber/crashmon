@@ -47,7 +47,14 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 NoNewPrivileges=true
 CapabilityBoundingSet=
+SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# k3: Reports sind sonst 0644 (jeder lokale User sieht exe-Pfad und
+# Core-Dateinamen); Namespace/Proc/IP-Haertung nachziehen.
+UMask=0077
+RestrictNamespaces=true
+ProtectProc=invisible
+IPAddressDeny=any
 
 # Sauberes Shutdown: Drain + Flush (Plan-Design 7)
 TimeoutStopSec=10

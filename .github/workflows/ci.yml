@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nutzt rust-toolchain.toml (1.95.0)
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          components: rustfmt, clippy
+
+      # systemd-Crate linkt gegen libsystemd
+      - name: Install systemd dev headers
+        run: sudo apt-get update && sudo apt-get install -y libsystemd-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test (daemon)
+        run: cargo test
+
+      - name: check (gui)
+        run: cargo check -p crashmon-gui

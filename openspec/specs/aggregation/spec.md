@@ -45,3 +45,11 @@ Ordnung und Fenster basieren auf `ts`, nie auf Empfangsreihenfolge (Backpressure
 - **Test:** `tests/aggregate_test.rs`
 
 Kein Report mit halber Korrelation (Fenster abwarten, dann emittieren).
+
+### AG-INV-4: Ein Stoerungsfall = ein Report (B3-Fix)
+- **Enforced:** false
+- **Test:** `tests/aggregate_test.rs` (AMD-Hang-Sequenz, OOM-Kaskade, Wedged+Reset)
+
+Gruppierung in `same_class`: GpuReset↔GpuReset (gleicher Vendor),
+OomKill↔OomKill (Kaskade), GpuReset↔GpuWedged. Ein AMD-Hang mit 4
+matchenden Zeilen in ~500 ms erzeugt EINEN Report, nicht vier.

@@ -1,0 +1,6 @@
+# MSRV-Pinning (k9): Deps sind exakt gepinnt (=), die Toolchain war es nicht.
+# 1.95 ist die Untergrenze des Workspace (egui/eframe 0.36.1: rust-version
+# 1.95; Let-Chains + Edition 2024 brauchen >= 1.88).
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"

@@ -61,3 +61,13 @@ Handle A: MESSAGE_ID-Match. Handle B: `_TRANSPORT=kernel`-Match. Keine Deseriali
 - **Test:** Compile-Time (LocalSet/current-thread) — `Journal` ist `!Send`
 
 Kein Teilen ueber Task-Grenzen, kein FD-Herausloesen.
+
+### JI-INV-5: Drain bis Exhausted (B1-Fix)
+- **Enforced:** false
+- **Test:** `journal.rs` next_event tri-state + Daemon-Drain-Loop (Review B1)
+
+`next_event` liefert drei Zustaende: Event / BudgetSpent (Zeitscheibe voll,
+`yield_now` + weiterlesen) / Exhausted (wirklich leer). Nicht-matchenden
+Eintraege beenden den Drain NICHT — ein amdgpu-Hang (20–50 Kernelzeilen)
+wird in einem Rutsch abgearbeitet statt mit ~2 Eintraegen pro Minute zu
+troepfeln. Budget: 512 Eintraege pro Aufruf.
