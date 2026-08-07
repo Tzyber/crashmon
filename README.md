@@ -94,8 +94,8 @@ Uevents (Netlink, WEDGED) ──────────────────
 | Bereich | Funktion |
 |---|---|
 | Kopf | Daemon starten/stoppen (SIGTERM = sauberer Shutdown mit Drain+Flush), Status |
-| Links | Report-Liste (neueste oben, 🆕-Badge, Auto-Select) |
-| Mitte | Detail: Event-Felder, 📋 JSON kopieren, Referenz (Severity + Erklärung), Wissensspeicher (klappbar) |
+| Links | Report-Liste (neueste oben, -Badge, Auto-Select) |
+| Mitte | Detail: Event-Felder,  JSON kopieren, Referenz (Severity + Erklärung), Wissensspeicher (klappbar) |
 | Unten | Daemon-Log (live, Tail) |
 
 Fenster schließen bei laufendem Daemon → Daemon wird sauber mitbeendet
