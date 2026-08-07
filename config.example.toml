@@ -7,3 +7,9 @@ dump_dir = "/var/lib/crashmon"
 
 # Log-Level (trace|debug|info|warn|error)
 log_level = "info"
+
+# k4 (Retention): Report-Dateien begrenzen. Beide optional, None = unbegrenzt.
+# max_reports: hoechstens so viele crash-*.json behalten (juengste gewinnen).
+# max_age_days: Reports aelter als N Tage loeschen.
+#max_reports = 200
+#max_age_days = 90

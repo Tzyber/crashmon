@@ -10,6 +10,23 @@ pub mod journal;
 
 use crate::event::CrashEvent;
 
+/// Ergebnis eines `next_event`-Aufrufs (B1-Fix, tri-state).
+///
+/// `None` bedeutet zwei verschiedene Dinge („Handle leer" vs. „Eintrag
+/// gelesen, aber kein Match") — ein einwertiges `Option` liess die
+/// Drain-Schleife beim ersten nicht-matchenden Eintrag abbrechen (stiller
+/// Totalausfall unter Nicht-Match-Fluten). Drei Zustaende bis ganz oben:
+pub enum Drained {
+    /// Ein Event (oder ein Lesefehler) ist zurueck.
+    Event(std::io::Result<CrashEvent>),
+    /// Eintraege sind noch da, aber das Zeitscheiben-Budget ist verbraucht —
+    /// Konsument soll `yield_now` machen und weiter drainen (Fairness gegen
+    /// die anderen LocalSet-Tasks bei Nicht-Match-Fluten).
+    BudgetSpent,
+    /// Wirklich leer: alle Handles sind am Ende.
+    Exhausted,
+}
+
 /// Abstraktion ueber das systemd-Journal. Tests verwenden einen Fake,
 /// der dieselben Methoden treibt (inkl. Warteschritt).
 pub trait JournalSource {
@@ -20,12 +37,13 @@ pub trait JournalSource {
     /// Persistenz-Fehler werden intern geschluckt (nur warn-Log).
     fn wait_readable(&mut self) -> impl std::future::Future<Output = std::io::Result<()>>;
 
-    /// Liefert den naechsten normalisierten Event, sofern vorhanden.
+    /// Liefert den naechsten normalisierten Event (tri-state, siehe `Drained`).
     ///
-    /// Vertrag: nach jedem `wait_readable` MUSS der Konsument bis `None`
-    /// drainen — sonst bleiben bereits gepufferte Events liegen, bis der
-    /// naechste Journal-Append eintrifft.
-    fn next_event(&mut self) -> Option<std::io::Result<CrashEvent>>;
+    /// Vertrag: nach jedem `wait_readable` MUSS der Konsument bis
+    /// `Drained::Exhausted` drainen — sonst bleiben bereits gepufferte
+    /// Events liegen, bis der naechste Journal-Append eintrifft.
+    /// `BudgetSpent` heisst: weiterlesen, aber vorher `yield_now()`.
+    fn next_event(&mut self) -> Drained;
 
     /// Persistiert die Leseposition (Cursor).
     ///

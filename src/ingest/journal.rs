@@ -146,12 +146,24 @@ fn ts_from(record: &BTreeMap<String, String>) -> u64 {
         .unwrap_or(0)
 }
 
-/// Liest den Eintrag des naechsten Eintrags eines Handles und normalisiert ihn.
-/// `Ok(None)` = kein Event aus diesem Eintrag (Position bleibt stehen, der
-/// naechste Aufruf iteriert einfach weiter — kein Seek noetig).
-fn entry_event(handle: &mut Journal, kind: HandleKind) -> io::Result<Option<CrashEvent>> {
+/// Ergebnis eines Eintrag-Leseversuchs (B1: tri-state statt `Ok(None)` fuer
+/// zwei verschiedene Zustaende).
+enum Entry {
+    /// Eintrag gelesen und gematcht.
+    Event(CrashEvent),
+    /// Eintrag gelesen, matcht kein Muster — Handle hat moeglicherweise
+    /// weitere Eintraege, weiterlesen!
+    Skipped,
+    /// Handle ist am Ende (kein Eintrag mehr da).
+    Exhausted,
+}
+
+/// Liest den naechsten Eintrag eines Handles und normalisiert ihn.
+/// `next_entry()` konsumiert den Eintrag (Position rueckt vor) — kein
+/// Seek noetig, der naechste Aufruf liest einfach den Folgeeintrag.
+fn entry_event(handle: &mut Journal, kind: HandleKind) -> io::Result<Entry> {
     let Some(record) = handle.next_entry()? else {
-        return Ok(None);
+        return Ok(Entry::Exhausted);
     };
     let ts = ts_from(&record);
     let kind = match kind {
@@ -164,7 +176,10 @@ fn entry_event(handle: &mut Journal, kind: HandleKind) -> io::Result<Option<Cras
         }
         HandleKind::Kernel => record.get("MESSAGE").and_then(|m| match_message(m)),
     };
-    Ok(kind.map(|kind| CrashEvent { ts, kind }))
+    Ok(match kind {
+        Some(kind) => Entry::Event(CrashEvent { ts, kind }),
+        None => Entry::Skipped,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -221,9 +236,45 @@ impl super::JournalSource for SdJournalSource {
         Ok(())
     }
 
-    fn next_event(&mut self) -> Option<io::Result<CrashEvent>> {
-        // Round-Robin ueber beide Handles: pro Aufruf genau ein Eintrag —
-        // Fairness ohne Hung-Loop bei Nicht-Match-Fluten.
+    fn next_event(&mut self) -> super::Drained {
+        // B1-Fix (tri-state): bis zu BUDGET Eintraege pro Aufruf abarbeiten.
+        // Nicht-Matches werden uebersprungen (weiterlesen!), statt den
+        // Drain abzubrechen. Erst wenn WIRKLICH nichts mehr da ist, kommt
+        // Exhausted; BudgetSpent = Eintraege uebrig, aber Zeitscheibe voll.
+        for _ in 0..BUDGET {
+            match self.step_one() {
+                Step::Event(ev) => return super::Drained::Event(Ok(ev)),
+                Step::Skipped => continue,
+                Step::Exhausted => return super::Drained::Exhausted,
+                Step::Err(e) => return super::Drained::Event(Err(e)),
+            }
+        }
+        super::Drained::BudgetSpent
+    }
+}
+
+/// Pro-Klick-Zustand der Round-Robin-Iteration.
+enum Step {
+    /// Eintrag gelesen und gematcht.
+    Event(CrashEvent),
+    /// Eintrag gelesen, matcht kein Muster — weiterlesen!
+    Skipped,
+    /// Beide Handles sind am Ende.
+    Exhausted,
+    Err(io::Error),
+}
+
+/// Budget pro `next_event`-Aufruf: harte Obergrenze, damit die Drain-
+/// Schleife bei einer Nicht-Match-Flut nicht die anderen LocalSet-Tasks
+/// (Aggregator, Uevent) aushungert. `BudgetSpent` + `yield_now` im
+/// Konsumenten ist der eigentliche Zweck (B1, rev. 2).
+const BUDGET: usize = 512;
+
+impl SdJournalSource {
+    /// Ein Round-Robin-Schritt: pro Aufruf genau EIN Eintrag vom rotierenden
+    /// Start-Handle. `Skipped` = Eintrag gelesen ohne Match — der Konsument
+    /// liest weiter; `Exhausted` = BEIDE Handles wirklich leer.
+    fn step_one(&mut self) -> Step {
         let (first, first_j, second_j) = if self.next_is_coredump {
             (HandleKind::Coredump, &mut self.coredump, &mut self.kernel)
         } else {
@@ -235,14 +286,16 @@ impl super::JournalSource for SdJournalSource {
             HandleKind::Kernel => HandleKind::Coredump,
         };
         match entry_event(first_j, first) {
-            Ok(Some(ev)) => return Some(Ok(ev)),
-            Ok(None) => {}
-            Err(e) => return Some(Err(e)),
+            Ok(Entry::Event(ev)) => return Step::Event(ev),
+            Ok(Entry::Skipped) => return Step::Skipped,
+            Ok(Entry::Exhausted) => {}
+            Err(e) => return Step::Err(e),
         }
         match entry_event(second_j, second) {
-            Ok(Some(ev)) => Some(Ok(ev)),
-            Ok(None) => None,
-            Err(e) => Some(Err(e)),
+            Ok(Entry::Event(ev)) => Step::Event(ev),
+            Ok(Entry::Skipped) => Step::Skipped,
+            Ok(Entry::Exhausted) => Step::Exhausted,
+            Err(e) => Step::Err(e),
         }
     }
 }

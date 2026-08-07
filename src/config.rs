@@ -11,6 +11,16 @@ pub struct Config {
 
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// k4 (Retention): hoechstens so viele Report-Dateien behalten
+    /// (`None` = unbegrenzt). Geprueft nach jedem Report-Write.
+    #[serde(default)]
+    pub max_reports: Option<u64>,
+
+    /// k4 (Retention): Reports aelter als so viele Tage loeschen
+    /// (`None` = nie). Geprueft nach jedem Report-Write.
+    #[serde(default)]
+    pub max_age_days: Option<u64>,
 }
 
 fn default_log_level() -> String {

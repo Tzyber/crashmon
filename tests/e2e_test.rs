@@ -51,7 +51,7 @@ async fn segv_produces_coredump_report() {
         sender,
         shutdown_rx.clone(),
     ));
-    let a = set.spawn_local(aggregator_loop(rx, lost, dump_dir.clone()));
+    let a = set.spawn_local(aggregator_loop(rx, lost, dump_dir.clone(), None, None));
 
     // Bis zu 30 s auf den Report warten (systemd-coredump kann den
     // Journal-Eintrag lastabhaengig um 10-20 s verzoegern)

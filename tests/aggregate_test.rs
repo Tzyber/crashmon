@@ -281,6 +281,86 @@ fn lost_counter_lands_in_report() {
     assert_eq!(report.lost_events, 1);
 }
 
+// --- B3: GpuReset/OomKill/Wedged-Gruppierung ------------------------------
+
+fn gpu_reset(vendor: &str, ts: u64) -> CrashEvent {
+    CrashEvent {
+        ts,
+        kind: EventKind::GpuReset {
+            vendor: vendor.into(),
+            detail: format!("{vendor}: GPU reset begin!"),
+        },
+    }
+}
+
+fn wedged(ts: u64) -> CrashEvent {
+    CrashEvent {
+        ts,
+        kind: EventKind::GpuWedged {
+            method: Some("rebind".into()),
+            device: None,
+        },
+    }
+}
+
+#[test]
+fn amdgpu_hang_sequence_is_one_report() {
+    // B3-Regression: AMD-Hang schreibt 3-4 matchende Zeilen in ~500 ms
+    // (ring timeout, reset begin, reset succeeded) — vorher 4 separate
+    // Reports, weil GpuReset↔GpuReset nicht gruppiert wurde.
+    let mut agg = fresh();
+    agg.push(gpu_reset("amdgpu", T0));
+    agg.push(gpu_reset("amdgpu", T0 + 100_000));
+    agg.push(gpu_reset("amdgpu", T0 + 400_000));
+
+    let report = agg.flush().expect("Report");
+    assert_eq!(report.related.len(), 2, "ein Hang = ein Report");
+    assert!(matches!(
+        report.cause.kind,
+        EventKind::GpuReset { ref vendor, .. } if vendor == "amdgpu"
+    ));
+}
+
+#[test]
+fn different_vendor_resets_not_grouped() {
+    // Zwei GPUs (z. B. iGPU + dGPU) reseten unabhaengig -> getrennte Reports
+    let mut agg = fresh();
+    agg.push(gpu_reset("amdgpu", T0));
+    let report = agg.push(gpu_reset("i915", T0 + 1_000_000)).expect("Report");
+    assert!(report.related.is_empty());
+}
+
+#[test]
+fn oom_cascade_is_one_report() {
+    // B3-Regression: Kernel killt bei OOM mehrere Prozesse — ein Ereignis
+    let mut agg = fresh();
+    agg.push(oom(11, T0));
+    agg.push(oom(12, T0 + 100_000));
+    agg.push(oom(13, T0 + 300_000));
+
+    let report = agg.flush().expect("Report");
+    assert_eq!(report.related.len(), 2, "Kaskade = ein Report");
+    assert!(matches!(
+        report.cause.kind,
+        EventKind::OomKill { pid: 11, .. }
+    ));
+}
+
+#[test]
+fn wedged_groups_with_reset() {
+    // Wedged-Event + Reset derselben Störung -> ein Report
+    let mut agg = fresh();
+    agg.push(gpu_reset("amdgpu", T0));
+    agg.push(wedged(T0 + 500_000));
+
+    let report = agg.flush().expect("Report");
+    assert_eq!(report.related.len(), 1);
+    assert!(matches!(
+        report.related[0].kind,
+        EventKind::GpuWedged { .. }
+    ));
+}
+
 #[test]
 fn channel_full_drops_newest_and_counts() {
     // Echter AG-3-Mechanismus (Review 2.4 MAJOR): Kanal voll -> try_send

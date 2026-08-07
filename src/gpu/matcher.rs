@@ -38,15 +38,101 @@ static RE_XID_PID: LazyLock<Regex> = LazyLock::new(|| {
     // "pid=1234" — Optionale PID fuer die Korrelation (Review 2.4 MINOR)
     Regex::new(r"pid=(?:'(\d+)'|(\d+))").expect("valid xid pid regex")
 });
+static RE_WEDGED_DEVICE: LazyLock<Regex> = LazyLock::new(|| {
+    // PCI-ID aus der Wedge-Deklaration: "Xe has declared device 0000:00:02.0
+    // as wedged" (k7: Device mitschneiden).
+    Regex::new(r"(?i)device\s+([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])")
+        .expect("valid wedged device regex")
+});
 
-/// Severity pro NVIDIA-Xid-Code (Recherche-Tabelle 2.2).
-/// 13/31/43/45 = hoch, 62 = kritisch, 79 = fatal.
-pub fn xid_severity(code: u16) -> &'static str {
+/// Severity-Klassifikation (W6: eine Quelle fuer matcher, GUI, knowledge.md).
+/// Sprache: Deutsch (GUI-Sprache des Projekts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Fatal,
+    Kritisch,
+    Hoch,
+    Mittel,
+    Unbekannt,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Severity::Fatal => write!(f, "fatal"),
+            Severity::Kritisch => write!(f, "kritisch"),
+            Severity::Hoch => write!(f, "hoch"),
+            Severity::Mittel => write!(f, "mittel"),
+            Severity::Unbekannt => write!(f, "unbekannt"),
+        }
+    }
+}
+
+/// Xid-Code -> (Severity, Beschreibung). EINE Tabelle (W6-Fix): frueher drei
+/// handgepflegte Listen (matcher.rs EN, reference.rs DE, knowledge.md) mit
+/// Abweichungen — jetzt ist diese hier die Wahrheit, GUI + knowledge.md
+/// lesen hieraus. Basis: recherche-phase1.md 2.2 + knowledge.md-Ergaenzungen.
+pub fn xid_info(code: u16) -> (Severity, &'static str) {
     match code {
-        13 | 31 | 43 | 45 => "high",
-        62 => "critical",
-        79 => "fatal",
-        _ => "unknown",
+        13 => (
+            Severity::Hoch,
+            "Graphics Engine Exception — GPU-Engine meldet einen Fehler; haeufig nach Treiber-/Speicherproblemen.",
+        ),
+        31 => (
+            Severity::Hoch,
+            "Illegal memory access — Kernel/App greift auf ungueltigen GPU-Speicher zu; haeufigste Xid-Ursache.",
+        ),
+        43 => (
+            Severity::Hoch,
+            "GPU stopped processing — GPU haelt an; oft Folgexid nach Xid 31.",
+        ),
+        45 => (
+            Severity::Hoch,
+            "Preemptive cleanup — Treiber raeumt nach einem Fehler auf; oft Folgexid.",
+        ),
+        62 => (
+            Severity::Kritisch,
+            "Internal micro-controller halt — der GPU-Controller haelt an; kritisch, oft Hardware-Defekt.",
+        ),
+        79 => (
+            Severity::Fatal,
+            "GPU has fallen off the bus — GPU wird vom PCIe-Bus getrennt; fatal, haeufig Hardware/Stromversorgung.",
+        ),
+        // Ergaenzungen aus knowledge.md ("Weitere Xid-Codes", User-verifiziert)
+        8 => (
+            Severity::Mittel,
+            "FIFO error / Channel Command Error (Treiber-Haenger).",
+        ),
+        32 => (
+            Severity::Hoch,
+            "Invalid Context (Proton/Vulkan/DXVK Kontext-Verlust).",
+        ),
+        48 => (
+            Severity::Kritisch,
+            "Double Bit ECC Error (Hardware-RAM-Fehler auf VRAM).",
+        ),
+        92 => (
+            Severity::Hoch,
+            "High Temperature / Thermal Event (GPU schuetzt sich vor Ueberhitzung).",
+        ),
+        109 => (
+            Severity::Mittel,
+            "CTX Switch Timeout (DXVK/VKD3D Timeout bei Spiel-Szenenwechsel).",
+        ),
+        _ => (
+            Severity::Unbekannt,
+            "Unbekannter Xid-Code — Details in der NVIDIA-Dokumentation pruefen.",
+        ),
+    }
+}
+
+/// Severity fuer ALLE Event-Typen (D2: Farbgebung der Oberflaeche).
+pub fn event_severity(kind: &EventKind) -> Severity {
+    match kind {
+        EventKind::GpuXid { code, .. } => xid_info(*code).0,
+        EventKind::GpuReset { .. } => Severity::Kritisch,
+        EventKind::GpuWedged { .. } => Severity::Fatal,
+        EventKind::Coredump { .. } | EventKind::OomKill { .. } => Severity::Hoch,
     }
 }
 
@@ -144,16 +230,35 @@ pub fn match_message(message: &str) -> Option<EventKind> {
     }
 
     if message.contains("wedged") {
-        // xe: "Xe has declared device ... as wedged"; WEDGED=<method> kommt
-        // nur ueber den Uevent-Pfad (Phase 2.3), nicht ueber MESSAGE.
-        return Some(EventKind::GpuWedged { method: None });
+        // k7: nur mit Treiber-Kontext matchen — "wedged" allein (Userspace,
+        // andere Subsysteme) waere zu breit. WEDGED=<method> kommt nur ueber
+        // den Uevent-Pfad (Phase 2.3), nicht ueber MESSAGE.
+        let driver_ctx = ["xe ", "amdgpu", "i915", "[drm]"]
+            .iter()
+            .any(|c| message.contains(c));
+        if driver_ctx {
+            // "Xe has declared device 0000:00:02.0 as wedged" -> PCI-ID
+            let device = RE_WEDGED_DEVICE.captures(message).map(|c| {
+                c.get(1)
+                    .expect("PCI-Gruppe ist fix")
+                    .as_str()
+                    .to_lowercase()
+            });
+            return Some(EventKind::GpuWedged {
+                method: None,
+                device,
+            });
+        }
     }
 
-    // GPU-Reset-Familie: Vendor ueber Treiber-Praefix bestimmen, nicht ueber
-    // Substring — i915 emittiert ebenfalls "[drm] GPU reset begin"-Zeilen.
-    let vendor = if message.contains("amdgpu:") {
+    // GPU-Reset-Familie: Vendor ueber Treiber-Namen bestimmen. B2-Fix: ohne
+    // Doppelpunkt — die echte Zeile ist "[drm:amdgpu_job_timedout [amdgpu]]
+    // *ERROR* ring gfx_0.0.0 timeout", nicht "amdgpu: ...". i915 emittiert
+    // ebenfalls "[drm] GPU reset begin"-Zeilen.
+    let vendor = if message.contains("amdgpu") {
         Some("amdgpu")
-    } else if message.contains("i915") || message.starts_with("GPU HANG") {
+    } else if message.contains("i915") || message.contains("xe ") || message.starts_with("GPU HANG")
+    {
         Some("i915")
     } else {
         None

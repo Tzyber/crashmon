@@ -2,7 +2,7 @@
 //! (JSON-Beispiele + reale Kernel-/Treiberzeilen) + NVIDIA-Xid-Doku.
 
 use crash_daemon::event::EventKind;
-use crash_daemon::gpu::matcher::{match_message, parse_coredump, xid_severity};
+use crash_daemon::gpu::matcher::{Severity, match_message, parse_coredump, xid_info};
 
 const MESSAGE_ID_COREDUMP: &str = "fc2e22bc6ee647b6b90729ab34a250b1";
 
@@ -121,21 +121,36 @@ fn xid_43_without_pci_prefix() {
 }
 
 #[test]
-fn xid_severity_table() {
-    assert_eq!(xid_severity(13), "high");
-    assert_eq!(xid_severity(31), "high");
-    assert_eq!(xid_severity(43), "high");
-    assert_eq!(xid_severity(45), "high");
-    assert_eq!(xid_severity(62), "critical");
-    assert_eq!(xid_severity(79), "fatal");
-    assert_eq!(xid_severity(999), "unknown");
+fn xid_info_table_single_source() {
+    // W6: EINE Tabelle — die knowledge.md-Ergaenzungen (8/32/48/92/109)
+    // sind hier mit drin, damit GUI + knowledge.md uebereinstimmen.
+    let cases = [
+        (8, Severity::Mittel),
+        (13, Severity::Hoch),
+        (31, Severity::Hoch),
+        (32, Severity::Hoch),
+        (43, Severity::Hoch),
+        (45, Severity::Hoch),
+        (48, Severity::Kritisch),
+        (62, Severity::Kritisch),
+        (79, Severity::Fatal),
+        (92, Severity::Hoch),
+        (109, Severity::Mittel),
+    ];
+    for (code, expected) in cases {
+        assert_eq!(xid_info(code).0, expected, "Xid {code}");
+        assert!(!xid_info(code).1.is_empty(), "Xid {code} ohne Beschreibung");
+    }
+    assert_eq!(xid_info(999).0, Severity::Unbekannt);
 }
 
 // --- amdgpu ---------------------------------------------------------------
 
 #[test]
 fn amdgpu_reset_begin() {
-    let msg = "amdgpu: GPU reset begin!";
+    // Reale Zeile (keybase/client#25070, Reset-Sequenz): Vendor steht im
+    // BDF-Praefix, nicht als "amdgpu:"-Praefix (B2).
+    let msg = "amdgpu 0000:63:00.0: amdgpu: GPU reset begin!";
     assert_eq!(
         match_message(msg),
         Some(EventKind::GpuReset {
@@ -171,7 +186,24 @@ fn amdgpu_reset_failed() {
 
 #[test]
 fn amdgpu_ring_timeout() {
-    let msg = "amdgpu: *ERROR* ring gfx_0.0.0 timeout, signaled seq=1, emitted seq=2";
+    // Reale Zeile (Launchpad #2031289): "[drm:amdgpu_job_timedout [amdgpu]]"
+    // enthaelt kein "amdgpu:" — B2-Regression, wurde frueher verpasst.
+    let msg = "[drm:amdgpu_job_timedout [amdgpu]] *ERROR* ring gfx_0.0.0 timeout, signaled seq=5346515, emitted seq=5346517";
+    assert_eq!(
+        match_message(msg),
+        Some(EventKind::GpuReset {
+            vendor: "amdgpu".into(),
+            detail: msg.into(),
+        })
+    );
+}
+
+#[test]
+fn amdgpu_ring_timeout_soft_recovered() {
+    // Arch BBS 288107: kurzer Freeze, Bild kommt zurueck, kein Reset —
+    // der haeufigste amdgpu-Fall beim Spielen. Ring-Timeout MUSS erkannt
+    // werden (B2-Fix).
+    let msg = "amdgpu 0000:07:00.0: [drm] ring gfx_0.0.0 timeout, but soft recovered";
     assert_eq!(
         match_message(msg),
         Some(EventKind::GpuReset {
@@ -213,7 +245,19 @@ fn xe_wedged() {
         "xe 0000:00:02.0: [drm] *ERROR* CRITICAL: Xe has declared device 0000:00:02.0 as wedged.";
     assert_eq!(
         match_message(msg),
-        Some(EventKind::GpuWedged { method: None })
+        Some(EventKind::GpuWedged {
+            method: None,
+            device: Some("0000:00:02.0".into()),
+        })
+    );
+}
+
+#[test]
+fn wedged_without_driver_context_is_none() {
+    // k7: "wedged" allein (Userspace, fremdes Subsystem) ist kein GPU-Event
+    assert_eq!(
+        match_message("my_app: device has wedged, please reboot"),
+        None
     );
 }
 
@@ -303,7 +347,8 @@ fn oom_reaper_line() {
 
 #[test]
 fn amdgpu_ring_sdma_timeout() {
-    let msg = "amdgpu: *ERROR* ring sdma1 timeout, signaled seq=7, emitted seq=8";
+    // Zeilenshape wie amdgpu_job_timedout (Arch BBS 288001), Ring sdma1
+    let msg = "amdgpu 0000:03:00.0: [drm:amdgpu_job_timedout [amdgpu]] *ERROR* ring sdma1 timeout, signaled seq=7, emitted seq=8";
     assert_eq!(
         match_message(msg),
         Some(EventKind::GpuReset {
@@ -315,7 +360,9 @@ fn amdgpu_ring_sdma_timeout() {
 
 #[test]
 fn amdgpu_ring_comp_timeout() {
-    let msg = "amdgpu: *ERROR* ring comp_1.0.0 timeout";
+    // Zeilenshape wie amdgpu_job_timedout (Arch BBS 288001), Ring comp_1.0.0
+    let msg =
+        "amdgpu 0000:03:00.0: [drm:amdgpu_job_timedout [amdgpu]] *ERROR* ring comp_1.0.0 timeout";
     assert_eq!(
         match_message(msg),
         Some(EventKind::GpuReset {
@@ -369,4 +416,50 @@ fn bare_gpu_reset_without_vendor_is_none() {
     // Ohne Treiber-Praefix ist der Vendor nicht bestimmbar — kein Match
     let msg = "[drm] GPU reset begin";
     assert_eq!(match_message(msg), None);
+}
+
+// --- Echte Kernelzeilen aus Bugreports (B2) -------------------------------
+
+#[test]
+fn real_kernel_lines_match_as_documented() {
+    // Fixture-Datei mit copy-paste-Zeilen aus echten Bugreports (Quellen im
+    // Dateikopf). Jede Zeile MUSS das dokumentierte Ergebnis liefern —
+    // verhindert die B2-Fehlerklasse (Fixtures gegen das Modell, nicht
+    // gegen die Realitaet).
+    let raw = include_str!("fixtures/kernel_lines.txt");
+    let mut pending: Option<&str> = None;
+    let mut checked = 0;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(expected) = line.strip_prefix("=> ") {
+            let src = pending.unwrap_or_else(|| panic!("=> ohne vorherige Zeile: {line}"));
+            match expected {
+                "None" => assert!(
+                    match_message(src).is_none(),
+                    "erwartet None, bekam {:?}: {src}",
+                    match_message(src)
+                ),
+                _ => {
+                    let kind = match_message(src)
+                        .unwrap_or_else(|| panic!("erwartet {expected}, bekam None: {src}"));
+                    let desc = match &kind {
+                        EventKind::GpuReset { vendor, .. } => format!("GpuReset/{vendor}"),
+                        EventKind::GpuWedged { .. } => "GpuWedged".into(),
+                        EventKind::OomKill { .. } => "OomKill".into(),
+                        EventKind::GpuXid { .. } => "GpuXid".into(),
+                        EventKind::Coredump { .. } => "Coredump".into(),
+                    };
+                    assert_eq!(desc, expected, "Zeile: {src}");
+                }
+            }
+            checked += 1;
+            pending = None;
+        } else {
+            pending = Some(line);
+        }
+    }
+    assert!(checked >= 7, "zu wenige Fixture-Zeilen geparst: {checked}");
 }

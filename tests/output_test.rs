@@ -159,6 +159,7 @@ fn serialize_deserialize_roundtrip_all_variants() {
         },
         EventKind::GpuWedged {
             method: Some("bus-reset".into()),
+            device: None,
         },
     ];
     for kind in kinds {
@@ -193,5 +194,68 @@ fn write_report_overwrites_same_ts() {
         .map(|e| e.unwrap().file_name().to_str().unwrap().to_owned())
         .collect();
     assert_eq!(files, vec![format!("crash-{}.json", report.ts)]);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prune_keeps_newest_and_removes_old() {
+    // k4: max_reports behaelt die juengsten; max_age_days entfernt aeltere
+    use crash_daemon::output::prune;
+    let dir = temp_dir("prune");
+    // ts: jetzt minus 3..0 Tage — damit max_age_days=2 gegen die echte
+    // Uhr arbeitet (heute = 2026-08-07, Relationen sind was zaehlt).
+    let day_us = 86_400_000_000u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    let base = now - 3 * day_us;
+    for day in 0..4u64 {
+        let report = xid_report();
+        fs::write(
+            dir.join(format!("crash-{}.json", base + day * day_us)),
+            serde_json::to_string(&report).unwrap(),
+        )
+        .unwrap();
+    }
+    // max_reports = 2: die 2 juengsten bleiben
+    let removed = prune(&dir, Some(2), None).expect("prune ok");
+    assert_eq!(removed, 2, "zwei aelteste entfernt");
+    let mut left: Vec<u64> = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_prefix("crash-")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    left.sort_unstable();
+    assert_eq!(left, vec![base + 2 * day_us, base + 3 * day_us]);
+
+    // max_age_days = 2: die verbliebenen (1 und 0 Tage alt) sind juenger
+    // als der Cutoff -> nichts entfernt
+    assert_eq!(prune(&dir, None, Some(2)).expect("prune ok"), 0);
+
+    // Alter Report (10 Tage) -> fliegt per Altersgrenze
+    let report = xid_report();
+    fs::write(
+        dir.join(format!("crash-{}.json", now - 10 * day_us)),
+        serde_json::to_string(&report).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(prune(&dir, None, Some(2)).expect("prune ok"), 1);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prune_noop_without_limits() {
+    use crash_daemon::output::prune;
+    let dir = temp_dir("prune-noop");
+    fs::write(dir.join("crash-1.json"), "{}").unwrap();
+    assert_eq!(prune(&dir, None, None).expect("noop"), 0);
     fs::remove_dir_all(&dir).ok();
 }

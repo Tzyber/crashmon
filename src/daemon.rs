@@ -15,10 +15,14 @@ use crate::aggregate::{Aggregator, EventSender, WINDOW};
 use crate::config::Config;
 use crate::event::CrashEvent;
 use crate::gpu::uevent::GpuUeventListener;
-use crate::ingest::JournalSource;
 use crate::ingest::journal::SdJournalSource;
-use crate::output::write_report;
-use std::path::PathBuf;
+use crate::ingest::{Drained, JournalSource};
+use crate::output::{prune, write_report};
+use std::fs::File;
+use std::io;
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -40,6 +44,54 @@ const TIMER_INACTIVE: Duration = Duration::from_secs(86_400);
 /// wird dauerhaft blind). Periodisches Re-Open registriert frische Watches;
 /// die Position bleibt ueber die Cursor-Persistenz erhalten.
 const JOURNAL_REOPEN: Duration = Duration::from_secs(60);
+
+/// W4 (Single-Instance-Guard): `flock(LOCK_EX|LOCK_NB)` auf `dump_dir/.lock`.
+/// Zwei parallele Daemon-Instanzen (GUI-Knopf + systemd-Unit) wuerden sich
+/// sonst den Cursor zerlegen (letzter gewinnt, der andere springt zurueck
+/// oder vor — verpasste/doppelte Events, gleiche `ts` ueberschreibt Reports).
+/// Der Lock-FD lebt bis zum Drop (Ende von `run`) — der Kernel hebt die
+/// Sperre auch bei Absturz automatisch auf.
+struct InstanceLock {
+    _file: File,
+}
+
+impl InstanceLock {
+    fn acquire(dir: &Path) -> io::Result<Self> {
+        let path = dir.join(".lock");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false) // PID-Hinweis des Besitzers nicht vor flock loeschen
+            .open(&path)?;
+        // SAFETY: flock ist ein reiner Syscall auf unserem offenen FD.
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock {
+                // PID-Hinweis fuer die Meldung: der Besitzer schreibt sie
+                // nach dem Acquire in die Datei.
+                let pid = std::fs::read_to_string(&path)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!(" (PID {s})"))
+                    .unwrap_or_default();
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("crashmon laeuft bereits{pid} — nur eine Instanz pro dump_dir"),
+                ));
+            }
+            return Err(err);
+        }
+        // Eigene PID notieren (nur als Diagnose-Hinweis fuer die zweite
+        // Instanz; der Lock selbst ist der flock). Nicht truncaten beim
+        // Open: sonst wuerde eine wartende zweite Instanz den Hinweis des
+        // Besitzers loeschen, bevor sie flock prueft.
+        let _ = file.set_len(0);
+        let _ = file.write_all(std::process::id().to_string().as_bytes());
+        Ok(Self { _file: file })
+    }
+}
 
 /// Journal-Reader-Task. `wait_readable`-Fehler sind fatal (Trait-Doc):
 /// Task beendet sich mit warn — Restart uebernimmt die Service-Unit.
@@ -78,10 +130,16 @@ pub async fn journal_loop(
                 }
             }
         }
-        while let Some(ev) = src.next_event() {
-            match ev {
-                Ok(ev) => sender.try_send(ev),
-                Err(e) => warn!("journal event fehlerhaft: {e}"),
+        // B1-Fix: drainen bis Exhausted — Nicht-Matches beenden den Drain
+        // NICHT mehr (vorher blieb ein amdgpu-Hang mit 20-50 Kernelzeilen
+        // bei ~2 Eintraegen pro Minute haengen). BudgetSpent -> yield_now,
+        // damit Aggregator/Uevent-Tasks bei Nicht-Match-Fluten weiterlaufen.
+        loop {
+            match src.next_event() {
+                Drained::Event(Ok(ev)) => sender.try_send(ev),
+                Drained::Event(Err(e)) => warn!("journal event fehlerhaft: {e}"),
+                Drained::BudgetSpent => tokio::task::yield_now().await,
+                Drained::Exhausted => break,
             }
         }
         // Leseposition erst NACH dem Konsum sichern (Trait-Vertrag).
@@ -136,6 +194,8 @@ pub async fn aggregator_loop(
     mut rx: tokio::sync::mpsc::Receiver<CrashEvent>,
     lost: Arc<AtomicU64>,
     dump_dir: PathBuf,
+    max_reports: Option<u64>,
+    max_age_days: Option<u64>,
 ) {
     let mut agg = Aggregator::new(lost);
     // Timer fuer offene Gruppen: schlaegt nach WINDOW+SLACK zu, sofern
@@ -157,6 +217,7 @@ pub async fn aggregator_loop(
                     // frueher verworfen, Timer invertiert gesetzt).
                     if let Some(report) = agg.push(ev) {
                         write_report_checked(&dump_dir, &report);
+                        prune_checked(&dump_dir, max_reports, max_age_days);
                     }
                     // push eroeffnet IMMER eine Gruppe (auch nach Close) —
                     // Timer gilt fuer die neue Gruppe.
@@ -167,6 +228,7 @@ pub async fn aggregator_loop(
             _ = &mut timer => {
                 if let Some(report) = agg.flush() {
                     write_report_checked(&dump_dir, &report);
+                    prune_checked(&dump_dir, max_reports, max_age_days);
                 }
                 timer.as_mut().reset(tokio::time::Instant::now() + TIMER_INACTIVE);
             },
@@ -182,6 +244,7 @@ pub async fn aggregator_loop(
     }
     if let Some(report) = agg.flush() {
         write_report_checked(&dump_dir, &report);
+        prune_checked(&dump_dir, max_reports, max_age_days);
     }
     debug!("aggregator loop beendet");
 }
@@ -190,6 +253,16 @@ fn write_report_checked(dir: &std::path::Path, report: &crate::output::Report) {
     match write_report(dir, report) {
         Ok(path) => debug!("report geschrieben: {}", path.display()),
         Err(e) => warn!("report schreiben fehlgeschlagen: {e}"),
+    }
+}
+
+/// k4: Retention nach jedem Report-Write — Fehler nur loggen (Rotation
+/// ist Nebensache, darf den Daemon nicht stoeren).
+fn prune_checked(dir: &Path, max_reports: Option<u64>, max_age_days: Option<u64>) {
+    match prune(dir, max_reports, max_age_days) {
+        Ok(0) => {}
+        Ok(n) => debug!("{n} alte Reports entfernt (Retention)"),
+        Err(e) => warn!("retention prune fehlgeschlagen: {e}"),
     }
 }
 
@@ -203,6 +276,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     // dump_dir frueh anlegen: Cursor-Persistenz braucht das Verzeichnis
     // VOR dem ersten Report (Live-Test-Befund 2.5).
     std::fs::create_dir_all(&cfg.dump_dir)?;
+    // W4: Single-Instance-Guard — der Lock lebt bis zum Ende von `run`.
+    let _lock = InstanceLock::acquire(&cfg.dump_dir)?;
     // Cursor-Persistenz neben den Reports im dump_dir (StateDirectory).
     let cursor_path = cfg.dump_dir.join("cursor");
     let src = SdJournalSource::open(&cursor_path)?;
@@ -219,7 +294,13 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
         shutdown_rx.clone(),
     ));
     let u = set.spawn_local(uevent_loop(listener, sender, shutdown_rx.clone()));
-    let mut a = set.spawn_local(aggregator_loop(rx, lost, cfg.dump_dir.clone()));
+    let mut a = set.spawn_local(aggregator_loop(
+        rx,
+        lost,
+        cfg.dump_dir.clone(),
+        cfg.max_reports,
+        cfg.max_age_days,
+    ));
 
     // Warten bis SIGTERM/SIGINT oder eine Task frueh beendet (Fehlerfall).
     // Live-Befund 2.6 (CRITICAL): Der Select MUSS in run_until laufen —

@@ -34,7 +34,8 @@ fn wedged_bus_reset() {
     assert_eq!(
         kind,
         EventKind::GpuWedged {
-            method: Some("bus-reset".into())
+            method: Some("bus-reset".into()),
+            device: None
         }
     );
 }
@@ -45,7 +46,8 @@ fn wedged_rebind() {
     assert_eq!(
         parse_uevent(&uevent(&msg)),
         Some(EventKind::GpuWedged {
-            method: Some("rebind".into())
+            method: Some("rebind".into()),
+            device: None
         })
     );
 }
@@ -56,7 +58,10 @@ fn wedged_plain() {
     let msg = ["ACTION=change", "SUBSYSTEM=drm", "WEDGED="];
     assert_eq!(
         parse_uevent(&uevent(&msg)),
-        Some(EventKind::GpuWedged { method: None })
+        Some(EventKind::GpuWedged {
+            method: None,
+            device: None,
+        })
     );
 }
 
@@ -123,7 +128,8 @@ fn equals_sign_in_value() {
     assert_eq!(
         parse_uevent(&uevent(&msg)),
         Some(EventKind::GpuWedged {
-            method: Some("a=b".into())
+            method: Some("a=b".into()),
+            device: None
         })
     );
 }
@@ -137,7 +143,8 @@ fn no_trailing_nul() {
     assert_eq!(
         parse_uevent(&buf),
         Some(EventKind::GpuWedged {
-            method: Some("reboot".into())
+            method: Some("reboot".into()),
+            device: None
         })
     );
 }
@@ -151,7 +158,8 @@ fn nlmsg_noop_prefix_is_skipped() {
     assert_eq!(
         parse_uevent(&buf),
         Some(EventKind::GpuWedged {
-            method: Some("bus-reset".into())
+            method: Some("bus-reset".into()),
+            device: None
         })
     );
 }

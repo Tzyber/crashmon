@@ -50,5 +50,10 @@ pub enum EventKind {
     },
     GpuWedged {
         method: Option<String>,
+        /// PCI-ID der GPU, falls die Kernelzeile sie nennt (k7:
+        /// "Xe has declared device 0000:00:02.0 as wedged"). `default`:
+        /// aeltere Reports ohne das Feld bleiben lesbar.
+        #[serde(default)]
+        device: Option<String>,
     },
 }

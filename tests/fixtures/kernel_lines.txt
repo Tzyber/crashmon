@@ -1,0 +1,33 @@
+# Reale Kernel-/Treiberzeilen aus Bugreports (B2-Fix: Fixtures muessen
+# belegbare Herkunft haben — selbst getippte Zeilen sind wertlos).
+#
+# Quellen:
+#   [1] Ubuntu Launchpad Bug #2031289  (amdgpu_job_timedout, Ring-Timeout)
+#   [2] Arch Linux BBS Thread 288001   (RX 5700 XT, wiederholte Ring-Timeouts)
+#   [3] Arch Linux BBS Thread 288107   (ring gfx timeout, but soft recovered)
+#   [4] GitHub keybase/client#25070    (vollstaendige Reset-Sequenz)
+#
+# Format: Zeile, dann "=> <Erwartung>" (GpuReset/<vendor>, GpuWedged,
+# OomKill, GpuXid, None). Geparst von tests/matcher_test.rs
+# (real_kernel_lines_match_as_documented).
+
+[drm:amdgpu_job_timedout [amdgpu]] *ERROR* ring gfx_0.0.0 timeout, signaled seq=5346515, emitted seq=5346517
+=> GpuReset/amdgpu
+
+amdgpu 0000:63:00.0: amdgpu: GPU reset begin!
+=> GpuReset/amdgpu
+
+amdgpu 0000:0c:00.0: [drm:amdgpu_ring_test_helper [amdgpu]] *ERROR* ring kiq_2.1.0 test failed (-110)
+=> None
+
+amdgpu: GPU reset(3) succeeded!
+=> GpuReset/amdgpu
+
+amdgpu 0000:07:00.0: [drm] ring gfx_0.0.0 timeout, but soft recovered
+=> GpuReset/amdgpu
+
+xe 0000:00:02.0: [drm] *ERROR* CRITICAL: Xe has declared device 0000:00:02.0 as wedged.
+=> GpuWedged
+
+i915 0000:00:02.0: [drm] GPU reset begin
+=> GpuReset/i915

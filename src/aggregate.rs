@@ -102,6 +102,16 @@ impl Group {
                 EventKind::GpuXid { pid: Some(x), .. } | EventKind::OomKill { pid: x, .. },
                 EventKind::Coredump { pid: y, .. },
             ) => x == y,
+            // B3-Fix: gleiche Vendor-Familie im Fenster = eine Stoerung
+            // (AMD-Hang: ring timeout + GPU reset begin + reset succeeded)
+            (EventKind::GpuReset { vendor: x, .. }, EventKind::GpuReset { vendor: y, .. }) => {
+                x == y
+            }
+            // OOM-Kaskade (Kernel killt mehrere Prozesse) = ein Ereignis
+            (EventKind::OomKill { .. }, EventKind::OomKill { .. }) => true,
+            // Wedged gehoert zum Reset derselben GPU
+            (EventKind::GpuReset { .. }, EventKind::GpuWedged { .. })
+            | (EventKind::GpuWedged { .. }, EventKind::GpuReset { .. }) => true,
             _ => false,
         }
     }

@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 
 /// Laedt beide Cursor. Fehlende Datei oder leere Zeilen = `None`
@@ -31,6 +32,10 @@ pub fn load(path: &Path) -> io::Result<(Option<String>, Option<String>)> {
 
 /// Speichert beide Cursor atomar. `None`-Seite wird als leere Zeile
 /// geschrieben (bestimmt gespeichert, nicht "vergessen").
+///
+/// W5-Fix (wie output.rs): sync_all vor rename + Verzeichnis-sync —
+/// die Resume-Position muss einen Stromausfall ueberleben (ein leerer
+/// Cursor waere sonst ein stiller Replay-Verlust).
 pub fn save(path: &Path, coredump: Option<&str>, kernel: Option<&str>) -> io::Result<()> {
     let content = format!(
         "{}\n{}\n",
@@ -38,6 +43,15 @@ pub fn save(path: &Path, coredump: Option<&str>, kernel: Option<&str>) -> io::Re
         kernel.unwrap_or_default()
     );
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content)?;
-    fs::rename(&tmp, path)
+    let mut f = fs::File::create(&tmp)?;
+    f.write_all(content.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent()
+        && let Ok(d) = fs::File::open(dir)
+    {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }

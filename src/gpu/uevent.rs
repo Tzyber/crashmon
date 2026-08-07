@@ -48,12 +48,18 @@ pub fn parse_uevent(buf: &[u8]) -> Option<EventKind> {
     if action != Some(b"change") || subsystem != Some(b"drm") {
         return None;
     }
-    // WEDGED gesetzt (auch leer = Wedge ohne Methode)
+    // WEDGED gesetzt (auch leer = Wedge ohne Methode). Device: Uevents
+    // fuehren DEVPATH statt PCI-ID — device bleibt None (k7 betrifft den
+    // Journal-Pfad, wo die Kernelzeile die PCI-ID nennt).
     match wedged {
         Some(m) if !m.is_empty() => Some(EventKind::GpuWedged {
             method: Some(String::from_utf8_lossy(m).into_owned()),
+            device: None,
         }),
-        Some(_) => Some(EventKind::GpuWedged { method: None }),
+        Some(_) => Some(EventKind::GpuWedged {
+            method: None,
+            device: None,
+        }),
         None => None,
     }
 }
@@ -61,6 +67,9 @@ pub fn parse_uevent(buf: &[u8]) -> Option<EventKind> {
 /// Nicht klonbarer Uevent-Socket (Raw-FD, laeuft auf der current_thread-Task).
 pub struct GpuUeventListener {
     fd: OwnedFd,
+    /// Empfangsbuffer ueber den Poll-Zyklen (k6): kein 128-KiB-Stack-Alloc
+    /// pro `read_events`-Aufruf.
+    buf: [u8; BUF_SIZE],
 }
 
 impl GpuUeventListener {
@@ -115,7 +124,10 @@ impl GpuUeventListener {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(Self { fd })
+        Ok(Self {
+            fd,
+            buf: [0u8; BUF_SIZE],
+        })
     }
 
     /// Liest alle gerade verfuegbaren Uevents (Drain bis EAGAIN).
@@ -126,14 +138,26 @@ impl GpuUeventListener {
     /// bereits passiert). Nach `Err` Socket neu aufsetzen mit Backoff.
     pub fn read_events(&mut self) -> io::Result<Vec<crate::event::CrashEvent>> {
         let mut events = Vec::new();
-        // Buffer ueber den Drain heben: recv ueberschreibt eh, kein
-        // 128-KiB-Memset pro Nachricht (Kernel-Uevents sind ~2 KiB).
-        let mut buf = [0u8; BUF_SIZE];
         loop {
-            // SAFETY: recv auf owned, nicht-blockierendem FD mit ausreichend
-            // grossem Buffer — kein Speicher-Invarianten-Risiko.
-            let n =
-                unsafe { libc::recv(self.fd.as_raw_fd(), buf.as_mut_ptr() as *mut _, BUF_SIZE, 0) };
+            // W3 (Spoofing-Guard): recvmsg statt recv — die Absenderadresse
+            // wird geprueft. Multicast auf Gruppe 1 darf nur der Kernel
+            // senden, aber Unicast an einen gebundenen Netlink-Socket darf
+            // jeder lokale Prozess (nl_pid bekannt, /proc/net/netlink).
+            // libudev verwirft in udev_monitor_receive_device alles mit
+            // nl_pid != 0 bzw. nl_groups == 0 — gleiche Regel hier.
+            let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+            let mut iov = libc::iovec {
+                iov_base: self.buf.as_mut_ptr() as *mut _,
+                iov_len: BUF_SIZE,
+            };
+            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+            msg.msg_name = &mut addr as *mut _ as *mut _;
+            msg.msg_namelen = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            // SAFETY: recvmsg auf owned, nicht-blockierendem FD; Buffer und
+            // sockaddr sind gueltige, ausreichend grosse Objekte.
+            let n = unsafe { libc::recvmsg(self.fd.as_raw_fd(), &mut msg, 0) };
             if n < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::WouldBlock {
@@ -144,7 +168,10 @@ impl GpuUeventListener {
                 }
                 return Err(err);
             }
-            let Some(kind) = parse_uevent(&buf[..n as usize]) else {
+            if addr.nl_pid != 0 || addr.nl_groups == 0 {
+                continue; // nicht vom Kernel gesendet — verwerfen
+            }
+            let Some(kind) = parse_uevent(&self.buf[..n as usize]) else {
                 continue;
             };
             let ts = SystemTime::now()

@@ -83,6 +83,8 @@ async fn push_closing_group_writes_report_immediately() {
         rx,
         Arc::new(AtomicU64::new(0)),
         dir.clone(),
+        None,
+        None,
     ));
 
     // Coredump(pid A) eroeffnet Gruppe; GpuReset (fremd) schliesst sie.
@@ -117,6 +119,8 @@ async fn timer_flushes_open_group() {
         rx,
         Arc::new(AtomicU64::new(0)),
         dir.clone(),
+        None,
+        None,
     ));
 
     sender.try_send(coredump(2, 2_000_000));
@@ -143,6 +147,8 @@ async fn shutdown_drop_flushes_remaining() {
         rx,
         Arc::new(AtomicU64::new(0)),
         dir.clone(),
+        None,
+        None,
     ));
 
     // Event senden und SOFORT droppen (kein Timer-Wait)

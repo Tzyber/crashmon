@@ -12,8 +12,8 @@
 //! Kernel-Event zur Laufzeit waere nicht deterministisch erzeugbar.
 
 use crash_daemon::event::EventKind;
-use crash_daemon::ingest::JournalSource;
 use crash_daemon::ingest::journal::SdJournalSource;
+use crash_daemon::ingest::{Drained, JournalSource};
 use std::os::unix::process::ExitStatusExt;
 use std::time::Duration;
 
@@ -63,11 +63,18 @@ async fn smoke_read_host_journal() {
             r = src.wait_readable() => r.expect("wait_readable ok"),
             _ = tokio::time::sleep_until(deadline) => break,
         }
-        while let Some(ev) = src.next_event() {
-            let ev = ev.expect("event parsen/normalisieren");
-            eprintln!("smoke event: {ev:?}");
-            if matches!(ev.kind, EventKind::Coredump { .. }) {
-                got_coredump = true;
+        // B1: bis Exhausted drainen (BudgetSpent -> weiterlesen)
+        loop {
+            match src.next_event() {
+                Drained::Event(Ok(ev)) => {
+                    eprintln!("smoke event: {ev:?}");
+                    if matches!(ev.kind, EventKind::Coredump { .. }) {
+                        got_coredump = true;
+                    }
+                }
+                Drained::Event(Err(e)) => panic!("event parsen/normalisieren: {e}"),
+                Drained::BudgetSpent => continue,
+                Drained::Exhausted => break,
             }
         }
         // Trait-Vertrag: Leseposition NACH dem Drain persistieren
