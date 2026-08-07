@@ -148,10 +148,12 @@ Zeilen erscheinen automatisch als `OomKill`-Reports.
 journalctl _TRANSPORT=kernel | grep -i "NVRM: Xid"
 ```
 
-**4. WEDGED-Uevent (root nötig):**
-```sh
-sudo udevadm trigger --subsystem-match=drm --action=change --property-match=WEDGED=bus-reset
-```
+**4. WEDGED-Uevent:** nicht deterministisch testbar — `udevadm trigger
+--property-match` filtert nur (kein Gerät hat ein `WEDGED`-Property,
+also passiert nichts), und der Kernel akzeptiert keine Custom-Properties
+per sysfs-Uevent-Write (EINVAL). Echte Wedge-Events kommen nur vom
+xe-Treiber; der Parser ist über `tests/uevent_test.rs` + den
+`xe ... as wedged`-Journal-Fixture abgedeckt.
 
 **5. Service-Unit (Produktiv):**
 ```sh
