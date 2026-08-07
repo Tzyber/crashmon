@@ -1,0 +1,56 @@
+# crashmon — Linux Crash-Daemon (Phase 2.5)
+#
+# Haertung (Plan-Design 6):
+# - User=crashmon + SupplementaryGroups=systemd-journal NUR (Journal-Lesezugriff
+#   via Gruppen-ACL auf /var/log/journal; KEINE video/render-Gruppe noetig)
+# - StateDirectory=crashmon -> /var/lib/crashmon (Reports + Cursor)
+# - PrivateDevices=true (kein GPU-Device-Zugriff noetig — Journal + Netlink reichen)
+# - RestrictAddressFamilies=AF_UNIX AF_NETLINK (sd-journal + Uevents; kein TCP/UDP)
+# - NoNewPrivileges, CapabilityBoundingSet leer, ProtectSystem strict etc.
+#
+# Einrichtung: User crashmon anlegen:
+#   useradd --system --home /var/lib/crashmon --shell /usr/sbin/nologin crashmon
+#   (StateDirectory legt /var/lib/crashmon automatisch mit crashmon-User an)
+
+[Unit]
+Description=crashmon — lightweight Linux crash daemon
+Documentation=file:///usr/share/doc/crashmon/README.md
+After=systemd-journald.service
+Wants=systemd-journald.service
+
+[Service]
+Type=simple
+User=crashmon
+Group=crashmon
+SupplementaryGroups=systemd-journal
+ExecStart=/usr/bin/crashmon --config /etc/crashmon/config.toml
+Restart=on-failure
+RestartSec=5
+
+# Zustand: Reports + Cursor unter /var/lib/crashmon
+StateDirectory=crashmon
+WorkingDirectory=/var/lib/crashmon
+
+# Sandbox
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+
+# Sauberes Shutdown: Drain + Flush (Plan-Design 7)
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+# crashmon Konfiguration (Beispiel)
+# Kein "Journal-Pfade"-Knopf: Backend nutzt sd_journal mit Systempfaden
+# (JournalFiles::All) — konfigurierbare Pfade waeren toter Zustand.
+
+# Zielverzeichnis fuer JSON-Crash-Reports
+dump_dir = "/var/lib/crashmon"
+
+# Log-Level (trace|debug|info|warn|error)
+log_level = "info"

@@ -1,0 +1,224 @@
+//! Daemon-Kindprozess-Lebenszyklus (GUI-Seite).
+//!
+//! Stop via SIGTERM (libc::kill) — NICHT Child::kill (das waere SIGKILL);
+//! der Daemon hat Drain+Flush auf SIGTERM (E2E-verifiziert). Stopping-
+//! Deadline (5 s) -> SIGKILL-Fallback. try_wait() reapt (kein Zombie).
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::time::{Duration, Instant};
+
+/// Parameterversion der Spawn-Funktion (injizierbar fuer Tests).
+pub struct SpawnConfig<'a> {
+    pub daemon_bin: &'a Path,
+    pub config: &'a Path,
+    pub dump_dir: &'a Path,
+    pub log_path: &'a Path,
+}
+
+/// Zustandsmaschine des Daemon-Kindprozesses.
+pub enum DaemonState {
+    Stopped,
+    Running { child: Child },
+    Stopping { child: Child, deadline: Instant },
+}
+
+impl DaemonState {
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self,
+            DaemonState::Running { .. } | DaemonState::Stopping { .. }
+        )
+    }
+}
+
+/// SIGTERM senden; Kind in `Stopping` mit Deadline ueberfuehren.
+pub fn stop_daemon(state: &mut DaemonState) {
+    let child = match std::mem::replace(state, DaemonState::Stopped) {
+        DaemonState::Running { child } => child,
+        other => {
+            *state = other;
+            return;
+        }
+    };
+    // SAFETY: child.id() ist eine echte PID unseres Kindprozesses.
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    *state = DaemonState::Stopping {
+        child,
+        deadline: Instant::now() + Duration::from_secs(5),
+    };
+}
+
+/// Pollt den Kindprozess (in logic()): reap bei Exit, SIGKILL nach Deadline.
+/// Liefert eine Statusmeldung bei Zustandswechsel.
+pub fn poll_daemon(state: &mut DaemonState) -> Option<String> {
+    match state {
+        DaemonState::Running { child } | DaemonState::Stopping { child, .. } => {
+            if let Some(status) = child.try_wait().ok().flatten() {
+                *state = DaemonState::Stopped;
+                return Some(format!("Daemon beendet: {status}"));
+            }
+        }
+        DaemonState::Stopped => return None,
+    }
+    if let DaemonState::Stopping { child, deadline } = state
+        && Instant::now() >= *deadline
+    {
+        let _ = child.kill(); // std kill = SIGKILL, letzte Stufe
+        let _ = child.wait(); // sofort reapen
+        *state = DaemonState::Stopped;
+        return Some("Daemon nach Timeout mit SIGKILL beendet".into());
+    }
+    None
+}
+
+/// GUI-Exit: Kind immer mitbeenden (kein Waisen-Daemon).
+/// SIGTERM, dann Spin bis Timeout, dann SIGKILL.
+pub fn shutdown_daemon(state: &mut DaemonState, timeout: Duration) {
+    stop_daemon(state);
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(_msg) = poll_daemon(state) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            if let DaemonState::Stopping { child, .. } = state {
+                let _ = child.kill();
+                let _ = child.wait();
+                *state = DaemonState::Stopped;
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Sucht `name` in PATH (pure, testbar).
+pub fn find_in_path(name: &str, path_var: Option<&str>) -> Option<PathBuf> {
+    for dir in path_var.unwrap_or("").split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Daemon-Binary: Sibling von current_exe (Dev: shared target-dir),
+/// Fallback PATH-Suche.
+pub fn find_daemon_bin() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join("crash-daemon");
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    find_in_path("crash-daemon", std::env::var("PATH").ok().as_deref())
+}
+
+/// Startet den Daemon: stdout/stderr in Log-Datei (NIE Pipe -> kein
+/// Blockieren des GUI-Threads), stdin null.
+pub fn spawn_daemon(cfg: &SpawnConfig) -> io::Result<Child> {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cfg.log_path)?;
+    std::process::Command::new(cfg.daemon_bin)
+        .args([
+            "--config",
+            cfg.config.to_str().unwrap_or_default(),
+            "--dump-dir",
+            cfg.dump_dir.to_str().unwrap_or_default(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .spawn()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn find_in_path_searches_order() {
+        let found = find_in_path("sleep", Some("/nonexistent:/usr/bin"));
+        assert_eq!(found, Some(PathBuf::from("/usr/bin/sleep")));
+    }
+
+    #[test]
+    fn stop_sends_sigterm_and_reaps() {
+        let child = std::process::Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        let mut state = DaemonState::Running { child };
+        stop_daemon(&mut state);
+        assert!(matches!(state, DaemonState::Stopping { .. }));
+
+        // Poll bis beendet (sleep stirbt an SIGTERM sofort)
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(msg) = poll_daemon(&mut state) {
+                assert!(msg.contains("beendet"), "{msg}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "SIGTERM-Exit zu langsam");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(matches!(state, DaemonState::Stopped));
+    }
+
+    #[test]
+    fn sigkill_fallback_after_deadline() {
+        // SIGTERM ignorierendes Kind (trap "" TERM)
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .spawn()
+            .expect("sh");
+        let mut state = DaemonState::Stopping {
+            child,
+            deadline: Instant::now() - Duration::from_millis(1), // Deadline abgelaufen
+        };
+        let msg = poll_daemon(&mut state).expect("Zustandswechsel");
+        assert!(msg.contains("SIGKILL"), "{msg}");
+        assert!(matches!(state, DaemonState::Stopped));
+    }
+
+    #[test]
+    fn shutdown_terminates_child() {
+        let child = std::process::Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        let mut state = DaemonState::Running { child };
+        shutdown_daemon(&mut state, Duration::from_secs(3));
+        assert!(matches!(state, DaemonState::Stopped));
+    }
+
+    #[test]
+    fn spawn_writes_log_file() {
+        let dir = std::env::temp_dir().join(format!("crashmon-gui-spawn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("log.txt");
+        let cfg = SpawnConfig {
+            daemon_bin: Path::new("/usr/bin/sh"),
+            config: Path::new("/dev/null"),
+            dump_dir: Path::new("/tmp"),
+            log_path: &log_path,
+        };
+        let child = spawn_daemon(&cfg).expect("spawn");
+        assert!(log_path.exists());
+        let mut state = DaemonState::Running { child };
+        shutdown_daemon(&mut state, Duration::from_secs(2));
+        fs::remove_dir_all(&dir).ok();
+    }
+}

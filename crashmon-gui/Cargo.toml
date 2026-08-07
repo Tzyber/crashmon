@@ -1,0 +1,20 @@
+[package]
+name = "crashmon-gui"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop-GUI fuer crashmon (egui/eframe)"
+
+# Abhaengigkeiten exakt gepinnt (=), Projekt-Philosophie. eframe/egui
+# 0.36.1 (Release 2026-08-05): wgpu-Default-Renderer, x11+wayland aktiv.
+# App-Trait seit 0.34: ui(&mut Ui) + logic(&mut ctx) (statt update(ctx)).
+
+[dependencies]
+crash-daemon = { path = "..", version = "=0.1.0" }
+eframe = "=0.36.1"
+egui = "=0.36.1"
+libc = "=0.2.189"
+serde_json = "=1.0.151"
+ureq = "=3.3.0"
+
+[dev-dependencies]
+egui_kittest = "=0.36.1"
