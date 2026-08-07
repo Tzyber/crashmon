@@ -1,16 +1,16 @@
-# crashmon — Linux Crash-Daemon & GUI
+# crashmon: Linux Crash-Daemon & GUI
 
-**Dein Crash versteht dich nicht — aber du kannst ihn verstehen lernen.**
+**Dein Crash versteht dich nicht, aber du kannst ihn verstehen lernen.**
 
 Wenn auf Linux etwas abstürzt, bleibt meist nur ein kryptischer Log-Eintrag:
 `NVRM: Xid 31`, `amdgpu: GPU reset begin!`, `Out of memory: Killed process 1234`.
 Was heißt das? Wer war das? Und was macht man jetzt?
 
-crashmon beantwortet das — automatisch. Es überwacht das System passiv
+crashmon beantwortet das automatisch. Es überwacht das System passiv
 (~0 % Idle-CPU), erkennt Crashes, GPU-Hänger und OOM-Kills, bündelt sie zu
 einem verständlichen Report und erklärt dir, was passiert ist. Und wenn
 etwas **Neues** auftaucht, das noch niemand erklärt hat: Es schlägt selbst
-nach und lernt daraus — deine Wissensdatenbank wächst mit jedem Fehler.
+nach und lernt daraus: deine Wissensdatenbank wächst mit jedem Fehler.
 
 ## Die Idee dahinter
 
@@ -19,9 +19,9 @@ Doku-Seiten und Treiber-Quelltexte. Dieses Tool entstand aus dem Frust,
 beim eigenen Crash vor einem Xid-Code zu sitzen, ohne zu wissen, was er
 bedeutet. Statt jedes Mal zu googeln, soll das System selbst sprechen:
 
-- **Erfassen** — was ist passiert? (Coredump, OOM, GPU-Reset, Xid, Wedged)
-- **Verstehen** — was bedeutet das? (eingebaute Referenz + Wissensspeicher)
-- **Lernen** — unbekannte Fehler werden nachgeschlagen und in die eigene
+- **Erfassen**: was ist passiert? (Coredump, OOM, GPU-Reset, Xid, Wedged)
+- **Verstehen**: was bedeutet das? (eingebaute Referenz + Wissensspeicher)
+- **Lernen**: unbekannte Fehler werden nachgeschlagen und in die eigene
   Wissensdatenbank übernommen; Community-Beiträge sind später per
   Pull-Request gegen die Repo-Wissensdatei möglich
 
@@ -55,7 +55,7 @@ sh -c 'kill -SEGV $$'
 # 4) Nach wenigen Sekunden erscheint der Report live in der Liste
 ```
 
-Ohne GUI — Daemon direkt:
+Ohne GUI (Daemon direkt):
 
 ```sh
 cargo run --release -- --config config.example.toml --dump-dir /tmp/crashmon
@@ -104,13 +104,13 @@ Start ist auf AMD normal und harmlos.
 
 ## Wissensspeicher & automatisches Nachschlagen
 
-- **Repo-Vorlage** `crashmon-gui/knowledge.md` — versionierbar, editierbar;
+- **Repo-Vorlage** `crashmon-gui/knowledge.md`: versionierbar, editierbar;
   beim Bauen eingebettet
-- **Laufzeit-Instanz** `~/.local/share/crashmon/knowledge.md` — deine
+- **Laufzeit-Instanz** `~/.local/share/crashmon/knowledge.md`: deine
   Einträge + nachgeschlagene Ergebnisse; wird **nie überschrieben**, aber
   automatisch um fehlende Vorlagen-Sektionen **erweitert** (Merge bei
   jedem Start)
-- Neue Xid-Codes, Signale, Meldungen einfach selbst eintragen — die GUI
+- Neue Xid-Codes, Signale, Meldungen einfach selbst eintragen, die GUI
   zeigt sie sofort
 - Community: Inhalte per Pull-Request gegen die Repo-Datei teilen
 
@@ -125,9 +125,9 @@ ulimit -c unlimited && sh -c 'kill -SEGV $$'
 sleep 30; ls /tmp/crashmon/crash-*.json
 ```
 Hinweis: systemd-coredump kann den Journal-Eintrag lastabhängig um
-10–20 s verzögern — Wartezeiten großzügig wählen.
+10–20 s verzögern; Wartezeiten großzügig wählen.
 
-**2. OOM-Killer:** Kern-Zeilen sind nicht ohne Root injizierbar — der
+**2. OOM-Killer:** Kern-Zeilen sind nicht ohne Root injizierbar; der
 Matcher ist via `tests/matcher_test.rs` deterministisch abgedeckt; reale
 Zeilen erscheinen automatisch als `OomKill`-Reports.
 
@@ -204,7 +204,7 @@ Paket `systemd-libs`).
 
 ## Aktive Entwicklung
 
-Dieses Projekt wird aktiv weiterentwickelt — Software, die stehen bleibt,
+Dieses Projekt wird aktiv weiterentwickelt: Software, die stehen bleibt,
 veraltet. Geplante/regelmäßige Arbeit:
 
 - Neue Fehlermuster und Xid-Codes in der Wissensbasis (auch aus eigenen
@@ -217,9 +217,9 @@ veraltet. Geplante/regelmäßige Arbeit:
 ## Bekannte Grenzen
 
 - systemd-coredump kann den Journal-Eintrag eines Crashes lastabhängig um
-  10–20 s verzögern — Reports erscheinen entsprechend später
+  10–20 s verzögern; Reports erscheinen entsprechend später
 - Das automatische Nachschlagen nutzt die DuckDuckGo-Instant-Answer-API;
-  für sehr spezielle Fehler liefert sie oft nichts — dann hilft ein
+  für sehr spezielle Fehler liefert sie oft nichts; dann hilft ein
   eigener Eintrag in `knowledge.md`
 - Unbekannte Xid-Codes ohne gesicherte Quelle werden bewusst nicht
-  erraten — sie bleiben dem Nachschlagen oder dir überlassen
+  erraten; sie bleiben dem Nachschlagen oder dir überlassen
