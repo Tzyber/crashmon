@@ -31,6 +31,11 @@ beim GUI-Start automatisch.
 - `spawn()` beim GUI-Start. `Err(WontShow)` („no StatusNotifierHost exists",
   verifiziert in ksni-Source) → kein Tray-Modus: Fenster-X beendet die App
   wie bisher, Statuszeile „Tray nicht verfügbar — Fenster-X beendet die App".
+- **Tray-Verlust zur Laufzeit** (D-Bus-Neustart, Host-Wegfall): `Handle::
+  update()` liefert dann Fehler/None — als Flanke behandeln: `tray_active =
+  false` + Statuszeile „Tray verloren — Fenster-X beendet die App wieder".
+  Sonst wird die versteckte GUI zum unerreichbaren Prozess (einziger
+  Exit-Weg war das Tray).
 
 ## Daemon-Lifecycle
 
@@ -40,14 +45,21 @@ beim GUI-Start automatisch.
 - **Vor `mount()`: Probe-Flock (`LOCK_EX|LOCK_NB`) auf `dump_dir/.lock`.**
   - Frei → Lock sofort wieder freigeben, Daemon normal spawnen (der Daemon
     selbst flockt danach — W4 `InstanceLock`, daemon.rs:48-89).
-  - Belegt → **`DaemonState::Foreign { pid }`** (PID aus `.lock`-Datei):
+  - Belegt → **`DaemonState::Foreign { pid }`** (PID aus `.lock`-Datei,
+    leer/0-Bytes möglich — der Daemon truncatet die Datei vor dem
+    PID-Write; dann `pid: None`):
     - Header-Button disabled, Label „läuft extern (PID x)"
     - Tray-Toggle ebenso
     - `on_exit`/`shutdown_daemon`/PDEATHSIG fassen ihn nicht an (kein Kind)
-  - `Foreign` wird automatisch verlassen: im Poll-Tick `kill(pid, 0)` —
-    `ESRCH` → zurück zu `Stopped` + Status „Externer Daemon beendet".
-    PID-Reuse ist möglich, aber harmlos: der echte Konflikt-Schutz bleibt der
-    Daemon-Flock beim nächsten `mount()`.
+  - `Foreign` wird automatisch verlassen: im Poll-Tick **Flock-Probe
+    erneut** (`LOCK_EX|LOCK_NB` — autoritativ, statt PID-Lebendigkeits-Check:
+    PID-Reuse und leere Lock-Datei machen den PID-Check unzuverlässig).
+    Frei → zurück zu `Stopped` + Status „Externer Daemon beendet".
+  - TOCTOU (zwei gleichzeitige GUI-Starts proben beide „frei"): der Verlierer
+    spawnt, sein Daemon stirbt am W4-Flock sofort. Im Exit-Pfad von
+    `poll_daemon` kurz nach Autostart erneut proben → wenn belegt:
+    `Foreign` mit Sieger-PID statt generischer „Daemon beendet: exit status"-
+    Meldung.
 - Der Doppel-Daemon-Schutz existiert DAEMON-seitig (W4, gleiche ts pro
   dump_dir unmöglich). systemd-Unit (/var/lib/crashmon) und GUI-Daemon
   (~/.local/share/crashmon) nutzen verschiedene dump_dirs → keine
@@ -81,18 +93,26 @@ beim GUI-Start automatisch.
   - `(true, true)` → `Proceed` (Tray-Quit-Pfad — ohne diese Kombination
     käme man über das Tray nie raus)
 - Tray „Beenden" → Sender `Quit` → GUI: `quitting = true`, dann
-  `send_viewport_cmd(Close)` → App endet → `on_exit` → `shutdown_daemon`.
+  `Visible(true)` (Close kann bei verstecktem/unmapped Fenster auf Wayland
+  verpuffen) und erst danach `send_viewport_cmd(Close)` → App endet →
+  `on_exit` → `shutdown_daemon`. Quit aus dem Hidden-Zustand ist der
+  typische Tray-Moment — im Smoke-Test explizit prüfen.
 
 ## Tray
 
 - **Icon:** eingebettete `icon_pixmap` (16+22 px ARGB, Code-generiert:
   neutral = graues Crash-Icon; Alarm-Variante wenn neue Reports seit dem
-  letzten sichtbaren Zeitpunkt ankamen — via `handle.update()` am
-  Report-Flanke). `icon_name` LEER lassen — bei
+  letzten sichtbaren Zeitpunkt ankamen). `icon_name` LEER lassen — bei
   SNI hat `IconName` Vorrang vor `IconPixmap`; ein unbekannter Name kann je
   nach Host in „gar kein Icon" enden statt auf das Pixmap zu fallen.
   ARGB32 ist in der SNI-Spec big-endian — falls Farben vertauscht
   ankommen, ist das die Ursache, nicht der Generator.
+- **Alarm-Flanke ohne D-Bus im Poll-Tick:** neue Reports werden nur im
+  500-ms-Tick erkannt (scan läuft dort) — `scan()` setzt daher nur ein
+  `tray_dirty`-Flag; das eigentliche `handle.update()` fürs Alarm-Icon läuft
+  in `logic()` außerhalb des Debounce-Zweigs (ein Roundtrip, nur wenn
+  dirty). Marke „letzter sichtbarer Zeitpunkt" wird beim Hide und beim
+  Show gesetzt.
 - Menü:
   - „Fenster anzeigen" → Sender `Show` → GUI: `Visible(true)` +
     `ViewportCommand::Focus` + `Minimized(false)` (Visible allein mappt nur;
@@ -128,6 +148,10 @@ beim GUI-Start automatisch.
   auf stdout, `SIGKILL` auf sich selbst. Test (via
   `env!("CARGO_BIN_EXE_pdeath_helper")`) pollt, ob das Kind stirbt —
   **mit Timeout** (sonst hängt CI, wenn PDEATHSIG nicht feuert).
+  **Timeout-Pfad räumt auf:** wenn PDEATHSIG fehlschlägt (der zu testende
+  Fall), läuft der Grandchild weiter und hält den Flock — der Test muss
+  ihn dann per SIGKILL beenden + reapen, sonst verfälscht er den nächsten
+  Lauf. Helper nutzt temp-dump_dir/temp-Config, nie den echten state_dir.
 - Bestandstests unverändert grün (state.rs inkl. `DaemonState::Foreign`
   in der Zustandsmaschine, kittest, scan).
 - Manueller Smoke auf dem echten Stack (KDE Wayland):
