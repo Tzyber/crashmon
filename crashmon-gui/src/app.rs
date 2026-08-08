@@ -375,6 +375,9 @@ impl CrashmonGui {
                 self.tray_dirty = false;
                 if self.hidden {
                     self.hidden = false;
+                    // Wayland: Visible reicht nicht (unsupported) —
+                    // Minimized(false) stellt den normalen Zustand her
+                    cmds.push(egui::ViewportCommand::Minimized(false));
                     cmds.push(egui::ViewportCommand::Visible(true));
                 }
             }
@@ -1235,6 +1238,11 @@ impl eframe::App for CrashmonGui {
                 CloseAction::Hide => {
                     self.hidden = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    // Wayland: set_visible ist unsupported (winit-0.30 Doku,
+                    // src/window.rs:970) — Minimized ist der einzige portable
+                    // Weg, das Fenster vom Bildschirm zu nehmen (xdg_toplevel
+                    // set_minimized). X11 verarbeitet beide Commands.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
                 CloseAction::Proceed => { /* App beendet nach diesem Frame */ }
