@@ -6,7 +6,7 @@ Erweitere diese Datei mit deinem Editor; die GUI aktualisiert beim naechsten Pol
 `~/.local/share/crashmon/knowledge.md` kopiert — dort sammeln sich deine
 Eintraege + Auto-gelerntes. Diese Vorlage hier ist der versionierbare Stand.)
 
-## Xid-Codes (NVIDIA, verifiziert aus recherche-phase1.md)
+## Xid-Codes (NVIDIA
 - 13: hoch — Graphics Engine Exception (GPU-Engine-Fehler)
 - 31: hoch — Illegal memory access (haeufigste Xid-Ursache)
 - 43: hoch — GPU stopped processing (oft Folgexid nach 31)
