@@ -112,6 +112,20 @@ eine Desktop-Notification aus (via `notify-send`, sonst still deaktiviert).
 Vulkan-Warnung (`radv is not a conformant...`) beim Start ist auf AMD
 normal und harmlos.
 
+## Tray-Modus
+
+Die GUI versteckt sich beim Fenster-Schließen ins Systemtray (StatusNotifierItem)
+und überwacht weiterhin den Report-Ordner. Beenden nur über das Tray-Menü.
+
+- KDE Plasma/COSMIC: funktioniert out of the box.
+- GNOME: AppIndicator-Extension erforderlich.
+- Ohne StatusNotifierHost startet die GUI ohne Tray — Fenster-X beendet die App
+  wie gewohnt.
+- Der Daemon startet automatisch mit der GUI; läuft bereits ein externer Daemon
+  (z. B. systemd-Unit), zeigt die GUI das und startet keinen zweiten.
+- Stirbt die GUI ungeordnet (kill -9, Logout), beendet der Kernel den Daemon
+  über PDEATHSIG (SIGTERM → Drain + Flush).
+
 ## Wissensspeicher & Nachschlagen
 
 - **Repo-Vorlage** `crashmon-gui/knowledge.md`: versionierbar, editierbar;
@@ -240,5 +254,3 @@ veraltet. Geplante/regelmäßige Arbeit:
   ist nur die GUI die Benachrichtigung
 - Unbekannte Xid-Codes ohne gesicherte Quelle werden bewusst nicht
   erraten; sie bleiben dem Browser-Nachschlagen oder dir überlassen
-- Die GUI hat noch keinen Tray-/Hintergrund-Modus: Fenster schließen
-  beendet den Daemon mit (geplant: Fenster verstecken + Tray-Icon)
