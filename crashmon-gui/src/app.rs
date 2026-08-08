@@ -39,6 +39,11 @@ const WINDOW_SIZE_KEY: &str = "window_size";
 /// W1: Poll-Debounce — repaint passiert bei Mausbewegung mit 60 fps, das
 /// Report-Verzeichnis wird hoechstens alle 500 ms gelesen.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Auswahlmarke in der Report-Liste: Balkenbreite + Hintergrund-Alpha
+/// (0..=255). Bewusst niedrig — die Auswahl soll erkennbar sein, nicht
+/// dominant. Wer sie kraeftiger will, dreht hier.
+const SEL_BAR_WIDTH: f32 = 3.0;
+const SEL_BG_ALPHA: u8 = 14;
 
 /// Injizierbare Spawn-Funktion (Tests nutzen einen Fake).
 type SpawnFn = Box<dyn Fn(&SpawnConfig) -> io::Result<Child>>;
@@ -358,7 +363,12 @@ impl CrashmonGui {
         if !self.reports.is_empty() && self.filter.is_empty() {
             // kein separates Filter-Label — der Filter gilt nur bei Text
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        // auto_shrink aus: sonst ist das Content-Ui nur so breit wie der
+        // laengste Titel — die Zeilenbreite (Klickflaeche + Auswahlmarke)
+        // haengt dann am Inhalt statt am Panel.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
             let now_us = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_micros() as u64)
@@ -412,7 +422,9 @@ impl CrashmonGui {
         let color = severity_color(sev);
 
         let title = if is_new {
-            format!("●  {}", summarize(report))
+            // U+2022 statt U+25CF: der grosse Kreis fehlt in den egui-
+            // Standardfonts und wird als Tofu-Kaestchen gerendert.
+            format!("•  {}", summarize(report))
         } else {
             summarize(report)
         };
@@ -422,25 +434,56 @@ impl CrashmonGui {
             format_ts_local(report.ts)
         );
 
-        // Auswahl-Hintergrund VOR den Labels zeichnen (Painter liegt sonst
-        // ueber dem Text).
+        // Auswahlmarke wird NACH dem Layout gezeichnet (die Zeilenhoehe steht
+        // erst dann fest), aber VOR dem Text einsortiert — deshalb jetzt ein
+        // Platzhalter im Painter, der unten ersetzt wird.
+        let marker = ui.painter().add(egui::Shape::Noop);
+        // Volle Panelbreite merken: inner.rect ist nur so breit wie der Text.
+        let panel = ui.max_rect();
+
         let inner = ui.vertical(|ui| {
-            if selected {
-                let bg = ui.visuals().selection.bg_fill;
-                let rect = ui.max_rect();
-                ui.painter().rect_filled(rect, 3.0, bg.gamma_multiply(0.35));
-            }
-            ui.label(egui::RichText::new(&title).strong().color(if selected {
-                ui.visuals().selection.stroke.color
-            } else {
-                color
-            }));
+            // Titelfarbe bleibt die Severity-Farbe — auch bei Auswahl. Die
+            // Severity ist die Information, die Auswahl nur ein Zustand.
+            ui.label(egui::RichText::new(&title).strong().color(color));
             ui.label(egui::RichText::new(&sub).weak().small());
         });
-        // Zeile als Klickflaeche: Selectable-Optik via Frame
-        let rect = inner.response.rect.expand(2.0);
+
+        let row = egui::Rect::from_min_max(
+            egui::pos2(panel.left(), inner.response.rect.top() - 2.0),
+            egui::pos2(panel.right(), inner.response.rect.bottom() + 2.0),
+        );
         let id = ui.make_persistent_id(("report-entry", ts));
-        let resp = ui.interact(rect, id, egui::Sense::click());
+        let resp = ui.interact(row, id, egui::Sense::click());
+
+        // Auswahl = schmaler Balken links in Severity-Farbe + kaum sichtbarer
+        // Hintergrund. Kein Farbblock: die Zeile soll lesbar bleiben, die
+        // Marke nur sagen: diese hier.
+        if selected {
+            ui.painter().set(
+                marker,
+                egui::Shape::Vec(vec![
+                    egui::Shape::rect_filled(
+                        row,
+                        3.0,
+                        egui::Color32::from_white_alpha(SEL_BG_ALPHA),
+                    ),
+                    egui::Shape::rect_filled(
+                        egui::Rect::from_min_max(
+                            row.min,
+                            egui::pos2(row.left() + SEL_BAR_WIDTH, row.bottom()),
+                        ),
+                        1.0,
+                        color,
+                    ),
+                ]),
+            );
+        } else if resp.hovered() {
+            // Nur Hover-Andeutung (die ganze Zeile ist Klickflaeche).
+            ui.painter().set(
+                marker,
+                egui::Shape::rect_filled(row, 3.0, egui::Color32::from_white_alpha(6)),
+            );
+        }
         if resp.clicked() {
             self.selected = Some(ts);
         }
@@ -505,10 +548,7 @@ impl CrashmonGui {
         ui.separator();
         ui.strong("Referenz");
         for (title, text) in reference_lines(&report.cause.kind) {
-            ui.horizontal_wrapped(|ui| {
-                ui.weak(format!("{title}: "));
-                ui.label(text);
-            });
+            reference_paragraph(ui, &title, &text);
         }
         // k1/Umbau: manuelles Nachschlagen im Browser (statt DDG-API) —
         // der User entscheidet, was er in die Wissensdatei uebernimmt.
@@ -566,13 +606,58 @@ impl CrashmonGui {
     }
 }
 
+/// Referenz-Absatz: Titel (schwach) + Fliesstext als EIN Label. Vorher
+/// standen beide als getrennte Widgets in `horizontal_wrapped` — dort erbt
+/// ein Label `TextWrapMode::Extend` und laeuft rechts aus dem Panel heraus,
+/// statt an der Kante umzubrechen.
+fn reference_paragraph(ui: &mut egui::Ui, title: &str, text: &str) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    job.append(
+        &format!("{title}: "),
+        0.0,
+        egui::TextFormat {
+            font_id: font.clone(),
+            color: ui.visuals().weak_text_color(),
+            ..Default::default()
+        },
+    );
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font,
+            color: ui.visuals().text_color(),
+            ..Default::default()
+        },
+    );
+    ui.add(egui::Label::new(job));
+    ui.add_space(2.0);
+}
+
+/// Technischer Wert (Pfad, Kernel-Meldung): an der Spaltenkante mit Ellipse
+/// gekuerzt statt aus dem Fenster zu laufen. Volltext im Tooltip — Umbruch
+/// waere hier schlechter, ein dreizeiliger Core-Pfad sprengt das Grid.
+fn mono_clip(ui: &mut egui::Ui, value: &str) {
+    ui.add(
+        egui::Label::new(egui::RichText::new(value).monospace())
+            .wrap_mode(egui::TextWrapMode::Truncate),
+    )
+    .on_hover_text(value);
+}
+
 /// Formatiertes Event-Detail (D1): Grid mit schwachen Labels + betonten
 /// Werten — Monospace nur noch fuer technische Werte (Pfade, Meldungen),
 /// keine handgezaehlten Leerzeichen mehr.
 fn render_event(ui: &mut egui::Ui, ev: &CrashEvent) {
+    // Deckel fuer die Wertespalte: ohne ihn richtet sich die Grid-Breite
+    // nach dem laengsten Wert (Core-Pfad) und schiebt ihn aus dem Panel.
+    let value_max = (ui.available_width() - 120.0).max(160.0);
     egui::Grid::new(format!("event-{}", ev.ts))
         .num_columns(2)
         .spacing([16.0, 4.0])
+        .max_col_width(value_max)
         .show(ui, |ui| {
             ui.weak("Zeit");
             ui.label(format_ts_local(ev.ts));
@@ -595,7 +680,7 @@ fn render_event(ui: &mut egui::Ui, ev: &CrashEvent) {
                     ui.end_row();
                     if let Some(exe) = exe {
                         ui.weak("Programm");
-                        ui.monospace(exe);
+                        mono_clip(ui, exe);
                         ui.end_row();
                     }
                     ui.weak("Comm");
@@ -618,7 +703,7 @@ fn render_event(ui: &mut egui::Ui, ev: &CrashEvent) {
                     }
                     if let Some(f) = coredump_file {
                         ui.weak("Core-Datei");
-                        ui.monospace(f);
+                        mono_clip(ui, f);
                         ui.end_row();
                     }
                 }
@@ -653,7 +738,7 @@ fn render_event(ui: &mut egui::Ui, ev: &CrashEvent) {
                         ui.end_row();
                     }
                     ui.weak("Meldung");
-                    ui.monospace(message);
+                    mono_clip(ui, message);
                     ui.end_row();
                 }
                 EventKind::GpuReset { vendor, detail } => {
@@ -661,7 +746,7 @@ fn render_event(ui: &mut egui::Ui, ev: &CrashEvent) {
                     ui.label(format!("GPU Reset ({vendor})"));
                     ui.end_row();
                     ui.weak("Meldung");
-                    ui.monospace(detail);
+                    mono_clip(ui, detail);
                     ui.end_row();
                 }
                 EventKind::GpuWedged { method, device } => {
@@ -675,7 +760,7 @@ fn render_event(ui: &mut egui::Ui, ev: &CrashEvent) {
                     }
                     if let Some(d) = device {
                         ui.weak("Device");
-                        ui.monospace(d);
+                        mono_clip(ui, d);
                         ui.end_row();
                     }
                 }
