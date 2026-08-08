@@ -29,10 +29,9 @@ jobs:
         run: cargo fmt --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: test (daemon)
-        run: cargo test
-
-      - name: check (gui)
-        run: cargo check -p crashmon-gui
+      # Workspace: deckt Daemon- UND GUI-Tests ab (52 GUI-Tests inkl.
+      # PDEATHSIG-E2E liefen vorher nie — cargo test traf nur default-members).
+      - name: test (workspace)
+        run: cargo test --workspace

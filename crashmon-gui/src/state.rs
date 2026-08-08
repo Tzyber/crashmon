@@ -41,9 +41,13 @@ impl DaemonState {
 
 /// SIGTERM senden; Kind in `Stopping` mit Deadline ueberfuehren.
 pub fn stop_daemon(state: &mut DaemonState) {
+    // KEIN Kind: Foreign vor mem::replace pruefen — der replace wuerde
+    // den Zustand sonst nach Stopped kippen statt no-op zu bleiben.
+    if matches!(state, DaemonState::Foreign { .. }) {
+        return;
+    }
     let child = match std::mem::replace(state, DaemonState::Stopped) {
         DaemonState::Running { child } => child,
-        DaemonState::Foreign { .. } => return, // kein Kind
         other => {
             *state = other;
             return;
@@ -258,6 +262,18 @@ mod tests {
     }
 
     #[test]
+    fn stop_auf_foreign_bleibt_noop() {
+        // F3-Regression: Foreign vor mem::replace pruefen, sonst kippt
+        // der Zustand nach Stopped statt no-op zu bleiben.
+        let mut state = DaemonState::Foreign { pid: Some(1) };
+        stop_daemon(&mut state);
+        assert!(
+            matches!(state, DaemonState::Foreign { .. }),
+            "Foreign bleibt Foreign (kein Kind zu stoppen)"
+        );
+    }
+
+    #[test]
     fn sigkill_fallback_after_deadline() {
         // SIGTERM ignorierendes Kind (trap "" TERM)
         let child = std::process::Command::new("/bin/sh")
@@ -303,6 +319,45 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Haelt den Test-Flock in einem separaten Prozess (kein Fork-Hazard
+    /// durch parallele Test-Kinder) und raeumt IMMER auf: Drop killt die
+    /// ganze Prozessgruppe (flock fork't das Kommando) — auch bei Panic
+    /// im Test (Rot-Pfad: sonst 30-s-Orphan mit flocktem FD + Pipe).
+    struct FlockHolder(std::process::Child);
+
+    impl FlockHolder {
+        fn acquire(dir: &std::path::Path) -> Self {
+            let _ = fs::File::create(dir.join(".lock")); // Absicherung gegen flock-Versionen ohne O_CREAT
+            let holder = std::process::Command::new("flock")
+                .arg(dir.join(".lock"))
+                .args(["-c", "sleep 30"])
+                .process_group(0) // eigene Gruppe -> Kill(-pid) trifft auch das geforkte Kind
+                .spawn()
+                .expect("flock-util (util-linux)");
+            let pid = holder.id();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while probe_daemon_lock(dir).is_none() {
+                assert!(
+                    Instant::now() < deadline,
+                    "flock-util hat den Lock nie genommen"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let _ = pid;
+            Self(holder)
+        }
+    }
+
+    impl Drop for FlockHolder {
+        fn drop(&mut self) {
+            let pid = self.0.id();
+            // SAFETY: kill auf unsere eigene frisch erzeugte Prozessgruppe
+            // (process_group(0)) — kein Kollateral.
+            unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+            let _ = self.0.wait();
+        }
+    }
+
     #[test]
     fn probe_lock_frei_belegt_und_leere_datei() {
         let dir = std::env::temp_dir().join(format!("crashmon-gui-flock-{}", std::process::id()));
@@ -316,24 +371,7 @@ mod tests {
         // Test-close gibt ihn dann nicht frei -> EWOULDBLOCK-Falsch-rot. Deshalb
         // haelt ein SEPARATER flock-Prozess den Lock: kein fremder Test-Prozess
         // erbt den FD, das Problem existiert nicht mehr.
-        fs::write(dir.join(".lock"), "").unwrap(); // flock-util oeffnet nicht mit create
-        let mut holder = std::process::Command::new("flock")
-            .arg(dir.join(".lock"))
-            .args(["-c", "sleep 30"])
-            // eigene Prozessgruppe: kill(-pid) erwischt auch das sleep-Kind
-            // (flock fork'd es) — sonst 30-s-Orphan mit flocktem FD und
-            // offener stdout-Pipe (cargo test | tail haengt).
-            .process_group(0)
-            .spawn()
-            .expect("flock-util (util-linux)");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while probe_daemon_lock(&dir).is_none() {
-            assert!(
-                Instant::now() < deadline,
-                "Lock-Halter uebernimmt den Lock nicht"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let _holder = FlockHolder::acquire(&dir);
         fs::write(dir.join(".lock"), std::process::id().to_string()).unwrap();
         assert_eq!(
             probe_daemon_lock(&dir),
@@ -342,11 +380,8 @@ mod tests {
         );
         fs::write(dir.join(".lock"), "").unwrap(); // leer (set_len(0)-Fenster)
         assert_eq!(probe_daemon_lock(&dir), Some(None), "belegt, PID leer");
-        // Aufraeumen: Lock-Halter beenden — ganze Prozessgruppe (flock +
-        // sein sleep-Kind), kein Orphan, Lock sofort frei.
-        // SAFETY: -pid ist die vom Test erzeugte Prozessgruppe (process_group).
-        unsafe { libc::kill(-(holder.id() as libc::pid_t), libc::SIGKILL) };
-        let _ = holder.wait();
+        // _holder-Drop killt die flock-Prozessgruppe — auch bei Panic im
+        // Test (kein 30-s-Orphan mit flocktem FD + Pipe).
         fs::remove_dir_all(&dir).ok();
     }
 

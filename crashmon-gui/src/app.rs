@@ -339,6 +339,10 @@ impl CrashmonGui {
                 // Alarm zuruecksetzen: der User hat jetzt hingesehen
                 // (Sichtbar-Zeitpunkt-Marke der Spec). Kein D-Bus im
                 // Tick, aber eine Flanke — ok. Im Test ist handle=None.
+                // tray_dirty: ein im Vor-Frame gesetztes Flag (scan bei
+                // hidden) wuerde das Icon im selben logic()-Tick wieder
+                // auf true setzen, obwohl der User hinsieht.
+                self.tray_dirty = false;
                 if let Some(handle) = &self.tray_handle {
                     let _ = handle.update(|t| t.alarm = false);
                 }
@@ -365,6 +369,10 @@ impl CrashmonGui {
                 // Statuszeile im versteckten Fenster sieht niemand.
                 self.tray_active = false;
                 self.status = "Tray verloren — Fenster wieder gezeigt, X beendet die App".into();
+                // tray_dirty: hidden->sichtbar — ein im Vor-Frame gesetztes
+                // Alarm-Flag (scan bei hidden) darf das Icon im selben
+                // logic()-Tick nicht neu setzen.
+                self.tray_dirty = false;
                 if self.hidden {
                     self.hidden = false;
                     cmds.push(egui::ViewportCommand::Visible(true));
@@ -1122,8 +1130,10 @@ mod tests {
         let dir = temp_state("traycmd");
         let mut app = CrashmonGui::with_spawner(dir.clone(), Box::new(fake_spawner), None);
         app.hidden = true;
+        app.tray_dirty = true; // F2: Vor-Frame-Flag (scan bei hidden)
         let cmds = app.handle_tray_cmd(TrayCmd::Show);
         assert!(!app.hidden, "Show macht sichtbar");
+        assert!(!app.tray_dirty, "Show konsumiert das Alarm-Flag");
         assert!(cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Visible(true))));
         assert!(cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Focus)));
 
@@ -1140,13 +1150,38 @@ mod tests {
         let mut app = CrashmonGui::with_spawner(dir.clone(), Box::new(fake_spawner), None);
         app.tray_active = true;
         app.hidden = true;
+        app.tray_dirty = true; // F2: Vor-Frame-Flag (scan bei hidden)
         let cmds = app.handle_tray_cmd(TrayCmd::TrayLost);
         assert!(!app.tray_active, "TrayLost deaktiviert Tray-Modus");
+        assert!(!app.tray_dirty, "TrayLost konsumiert das Alarm-Flag");
         assert!(!app.hidden, "TrayLost macht das Fenster wieder sichtbar");
         assert!(
             cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Visible(true))),
             "verlorenes Tray -> Fenster zeigen"
         );
+        assert!(app.status.contains("Tray verloren"), "{}", app.status);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tray_disconnected_zeigt_fenster_wieder() {
+        // F5-Regression: stirbt der ksni-Thread (Service-Exit/Panic/Bus-
+        // Ausfall ohne watcher_offline), faellt try_recv auf Disconnected —
+        // logic() muss dann TrayLost-Logik fahren, sonst bleibt die GUI
+        // versteckt und unerreichbar.
+        use eframe::App; // logic() ist eframe::App-Methode
+        let dir = temp_state("traydisc");
+        let (tx, rx) = std::sync::mpsc::channel::<TrayCmd>();
+        drop(tx); // Sender (ksni-Thread) tot
+        let mut app = CrashmonGui::with_spawner(dir.clone(), Box::new(fake_spawner), None);
+        app.tray_rx = rx;
+        app.tray_active = true;
+        app.hidden = true;
+        let ctx = egui::Context::default();
+        // _new_kittest: einziger public Frame-Konstruktor (Test-Harness).
+        app.logic(&ctx, &mut eframe::Frame::_new_kittest());
+        assert!(!app.tray_active, "Disconnected deaktiviert Tray-Modus");
+        assert!(!app.hidden, "Disconnected zeigt das Fenster wieder");
         assert!(app.status.contains("Tray verloren"), "{}", app.status);
         fs::remove_dir_all(&dir).ok();
     }
@@ -1160,9 +1195,30 @@ impl eframe::App for CrashmonGui {
         // im D-Bus-Thread -> Sender) — kein is_closed-Poll noetig
         // (Review: Handle-Closed ist nicht dasselbe wie Host-Wegfall;
         // watcher_offline feuert bei StatusNotifierWatcher-Exit).
-        while let Ok(cmd) = self.tray_rx.try_recv() {
-            for c in self.handle_tray_cmd(cmd) {
-                ctx.send_viewport_cmd(c);
+        loop {
+            match self.tray_rx.try_recv() {
+                Ok(cmd) => {
+                    for c in self.handle_tray_cmd(cmd) {
+                        ctx.send_viewport_cmd(c);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // ksni-Thread tot (Service-Exit/Panic/Bus-Ausfall ohne
+                    // watcher_offline): sonst bleibt die GUI versteckt und
+                    // unerreichbar — TrayLost-Logik, einmal.
+                    if self.tray_active {
+                        self.tray_active = false;
+                        // Split-Form (fmt: Zeile >100, identisch zu TrayLost).
+                        self.status =
+                            "Tray verloren — Fenster wieder gezeigt, X beendet die App".into();
+                        if self.hidden {
+                            self.hidden = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        }
+                    }
+                    break;
+                }
             }
         }
         // Alarm-Icon-Flanke: EIN Roundtrip, nur wenn scan() Neues fand
