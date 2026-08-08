@@ -4,6 +4,19 @@ version = "0.1.0"
 edition = "2024"
 description = "Desktop-GUI fuer crashmon (egui/eframe)"
 
+# Lib-Split (Review): Module in der Lib, damit Test-Bins (pdeath_helper)
+# sie sehen — main.rs importiert nur noch den Startpunkt. Name der Lib
+# "crashmon_gui" (Paketname crashmon-gui, Underscore-Konvention).
+[lib]
+name = "crashmon_gui"
+path = "src/lib.rs"
+
+# PDEATHSIG-E2E: Testcode als eigenes Bin statt env-Flag im
+# Produktions-main (k8-Lehre).
+[[bin]]
+name = "pdeath_helper"
+path = "src/bin/pdeath_helper.rs"
+
 # Abhaengigkeiten exakt gepinnt (=), Projekt-Philosophie. eframe/egui
 # 0.36.1 (Release 2026-08-05): wgpu-Default-Renderer, x11+wayland aktiv.
 # App-Trait seit 0.34: ui(&mut Ui) + logic(&mut ctx) (statt update(ctx)).

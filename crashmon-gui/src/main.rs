@@ -1,18 +1,9 @@
 //! crashmon-gui — Desktop-Oberflaeche fuer den crashmon-Crash-Daemon.
 //!
-//! Startet/stoppt den Daemon als Kindprozess (kein Root) und zeigt die
-//! JSON-Reports formatiert an (Live-Update). eframe/egui 0.36-API:
-//! `App::ui(&mut Ui)` + `App::logic(&mut ctx)` (0.34-Breaking-Change).
+//! Nur Startpunkt: eframe-API + App-Konstruktion. Alle Module leben in
+//! der Lib (crashmon_gui), damit Test-Bins (pdeath_helper) sie sehen.
 
-mod app;
-mod config;
-mod format;
-mod logtail;
-mod reference;
-mod scan;
-mod state;
-
-use app::CrashmonGui;
+use crashmon_gui::app::CrashmonGui;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
