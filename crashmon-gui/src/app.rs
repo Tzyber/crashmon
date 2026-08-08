@@ -229,6 +229,7 @@ impl CrashmonGui {
                 Some(child.id())
             }
             DaemonState::Stopped => None,
+            DaemonState::Foreign { .. } => None, // fremde PID ist nur Diagnose
         }
     }
 
@@ -303,6 +304,7 @@ impl CrashmonGui {
                 DaemonState::Stopped => ("Daemon starten", true),
                 DaemonState::Running { .. } => ("Daemon stoppen", true),
                 DaemonState::Stopping { .. } => ("stoppt...", false),
+                DaemonState::Foreign { .. } => ("läuft extern", false),
             };
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                 if self.daemon.is_running() {

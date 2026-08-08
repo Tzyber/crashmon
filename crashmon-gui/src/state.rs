@@ -5,6 +5,7 @@
 //! Deadline (5 s) -> SIGKILL-Fallback. try_wait() reapt (kein Zombie).
 
 use std::io;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -18,10 +19,14 @@ pub struct SpawnConfig<'a> {
 }
 
 /// Zustandsmaschine des Daemon-Kindprozesses.
+/// Fremd-Daemon (anderer Prozess haelt `dump_dir/.lock`, W4-Flock): kein
+/// Kind, nichts zu killen — Button/Tray disabled. PID ist nur Diagnose
+/// (Datei kann leer sein: der Daemon truncatet vor dem PID-Write).
 pub enum DaemonState {
     Stopped,
     Running { child: Child },
     Stopping { child: Child, deadline: Instant },
+    Foreign { pid: Option<u32> },
 }
 
 impl DaemonState {
@@ -37,6 +42,7 @@ impl DaemonState {
 pub fn stop_daemon(state: &mut DaemonState) {
     let child = match std::mem::replace(state, DaemonState::Stopped) {
         DaemonState::Running { child } => child,
+        DaemonState::Foreign { .. } => return, // kein Kind
         other => {
             *state = other;
             return;
@@ -61,6 +67,7 @@ pub fn poll_daemon(state: &mut DaemonState) -> Option<String> {
             }
         }
         DaemonState::Stopped => return None,
+        DaemonState::Foreign { .. } => return None, // kein Kind zu reapen
     }
     if let DaemonState::Stopping { child, deadline } = state
         && Instant::now() >= *deadline
@@ -73,9 +80,51 @@ pub fn poll_daemon(state: &mut DaemonState) -> Option<String> {
     None
 }
 
+/// Probe-Flock auf `dir/.lock` (W4-Lock des Daemons). `None` = frei;
+/// `Some(pid)` = belegt (PID aus der Datei, `None` wenn leer — der
+/// Daemon truncatet die Datei, bevor er die eigene PID schreibt).
+/// NUR als UX-Check vor `mount()` und im `Foreign`-Zweig — der echte
+/// Konflikt-Schutz ist der Daemon-Flock selbst.
+pub fn probe_daemon_lock(dir: &Path) -> Option<Option<u32>> {
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(".lock"))
+    {
+        Ok(f) => f,
+        Err(_) => return None, // kein Zugriff -> frei proben, Daemon entscheidet
+    };
+    // SAFETY: flock auf unserem eigenen FD, non-blocking.
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let pid = std::fs::read_to_string(dir.join(".lock"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+        return Some(pid);
+    }
+    None // flock ging durch -> frei; Lock faellt mit dem FD-Drop
+}
+
+/// Poll-Tick fuer `Foreign`: Lock erneut proben (autoritativ — PID-Check
+/// wuerde PID-Reuse und leere Lock-Datei nicht erkennen). Frei -> `Stopped`.
+pub fn poll_foreign(state: &mut DaemonState, dump_dir: &Path) -> Option<String> {
+    let DaemonState::Foreign { .. } = state else {
+        return None;
+    };
+    if probe_daemon_lock(dump_dir).is_none() {
+        *state = DaemonState::Stopped;
+        return Some("Externer Daemon beendet — Bereit".into());
+    }
+    None
+}
+
 /// GUI-Exit: Kind immer mitbeenden (kein Waisen-Daemon).
 /// SIGTERM, dann Spin bis Timeout, dann SIGKILL.
 pub fn shutdown_daemon(state: &mut DaemonState, timeout: Duration) {
+    if matches!(state, DaemonState::Foreign { .. }) {
+        return; // fremder Prozess — nicht unseren Lock wegnehmen
+    }
     stop_daemon(state);
     let deadline = Instant::now() + timeout;
     loop {
@@ -220,5 +269,58 @@ mod tests {
         let mut state = DaemonState::Running { child };
         shutdown_daemon(&mut state, Duration::from_secs(2));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn probe_lock_frei_belegt_und_leere_datei() {
+        let dir = std::env::temp_dir().join(format!("crashmon-gui-flock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(probe_daemon_lock(&dir), None, "kein Lock -> frei");
+
+        // belegt: Datei + flock durch Testprozess halten
+        let file = fs::File::create(dir.join(".lock")).unwrap();
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(ret, 0, "Test-Lock muss gelingen");
+        fs::write(dir.join(".lock"), std::process::id().to_string()).unwrap();
+        assert_eq!(
+            probe_daemon_lock(&dir),
+            Some(Some(std::process::id())),
+            "belegt mit PID"
+        );
+        fs::write(dir.join(".lock"), "").unwrap(); // leer (set_len(0)-Fenster)
+        assert_eq!(probe_daemon_lock(&dir), Some(None), "belegt, PID leer");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn foreign_wird_bei_freiem_lock_zu_stopped() {
+        let dir = std::env::temp_dir().join(format!("crashmon-gui-frel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut state = DaemonState::Foreign { pid: Some(999999) };
+        let msg = poll_foreign(&mut state, &dir).expect("Zustandswechsel");
+        assert!(msg.contains("Externer Daemon"), "{msg}");
+        assert!(matches!(state, DaemonState::Stopped));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn foreign_bleibt_wenn_lock_belegt() {
+        let dir = std::env::temp_dir().join(format!("crashmon-gui-flbl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = fs::File::create(dir.join(".lock")).unwrap();
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let mut state = DaemonState::Foreign { pid: Some(123) };
+        assert_eq!(poll_foreign(&mut state, &dir), None, "Lock noch belegt");
+        assert!(matches!(state, DaemonState::Foreign { .. }));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn foreign_is_not_running() {
+        let state = DaemonState::Foreign { pid: Some(1) };
+        assert!(!state.is_running());
     }
 }
