@@ -6,6 +6,7 @@
 
 use std::io;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -171,6 +172,33 @@ pub fn find_daemon_bin() -> Option<PathBuf> {
     find_in_path("crashmon", std::env::var("PATH").ok().as_deref())
 }
 
+/// WARUM (Landmine, nicht wegkommentieren): PDEATHSIG haengt am THREAD,
+/// nicht am Prozess — stirbt der Thread, der geforkt hat, feuert es sofort.
+/// Heute spawnt der Main-Thread (lebt so lange wie die App); wenn der
+/// Spawn je in einen Worker-Thread wandert, muss dieser Thread fuer die
+/// Lebensdauer des Kindes am Leben bleiben.
+/// Effekt: kill -9 / Logout / OOM / Panic der GUI -> Kernel schickt dem
+/// Daemon SIGTERM (Drain+Flush) — kein Waisen-Daemon.
+/// Race-Fenster (Parent stirbt zwischen fork und prctl) schliesst der
+/// getppid()-Vergleich; alle Calls sind async-signal-safe.
+/// Compilierbar in dieser Form: `pre_exec` verlangt `FnMut() ->
+/// io::Result<()> + Send + Sync`; getppid liefert `pid_t` (i32) -> cast.
+pub fn pdeathsig_pre_exec(
+    expected_ppid: u32,
+) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {
+    move || {
+        // SAFETY: prctl/getppid/_exit sind async-signal-safe, im Kind
+        // nach fork (exklusiver Kontext), kein Rust-Heap-Zugriff.
+        unsafe {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            if libc::getppid() as u32 != expected_ppid {
+                libc::_exit(0); // Parent starb vor prctl -> Kind ohne Sinn
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Startet den Daemon: stdout/stderr in Log-Datei (NIE Pipe -> kein
 /// Blockieren des GUI-Threads), stdin null.
 pub fn spawn_daemon(cfg: &SpawnConfig) -> io::Result<Child> {
@@ -178,17 +206,21 @@ pub fn spawn_daemon(cfg: &SpawnConfig) -> io::Result<Child> {
         .create(true)
         .append(true)
         .open(cfg.log_path)?;
-    std::process::Command::new(cfg.daemon_bin)
-        .args([
-            "--config",
-            cfg.config.to_str().unwrap_or_default(),
-            "--dump-dir",
-            cfg.dump_dir.to_str().unwrap_or_default(),
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .spawn()
+    let ppid = std::process::id();
+    let mut cmd = std::process::Command::new(cfg.daemon_bin);
+    cmd.args([
+        "--config",
+        cfg.config.to_str().unwrap_or_default(),
+        "--dump-dir",
+        cfg.dump_dir.to_str().unwrap_or_default(),
+    ])
+    .stdin(std::process::Stdio::null())
+    .stdout(log.try_clone()?)
+    .stderr(log);
+    // SAFETY: pre_exec laeuft nach fork im Kind; pdeathsig_pre_exec
+    // nutzt nur async-signal-safe Calls (prctl/getppid/_exit).
+    unsafe { cmd.pre_exec(pdeathsig_pre_exec(ppid)) };
+    cmd.spawn()
 }
 
 #[cfg(test)]
