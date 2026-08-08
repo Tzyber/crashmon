@@ -7,6 +7,7 @@
 
 use clap::Parser;
 use crash_daemon::{config, daemon};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -32,6 +33,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(&cfg.log_level))
+        // ANSI nur, wenn stdout wirklich ein Terminal ist. tracing-subscriber
+        // faerbt sonst auch dann, wenn die GUI stdout in eine Datei umlenkt —
+        // die Escape-Sequenzen stehen dann als Muell im Log.
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 
     tracing::info!("crashmon starting, dump_dir={}", cfg.dump_dir.display());

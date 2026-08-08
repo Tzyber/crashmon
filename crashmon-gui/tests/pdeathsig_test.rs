@@ -64,5 +64,8 @@ fn pdeathsig_killt_kind_beim_parent_tod() {
     if pid_alive(kind_pid) {
         unsafe { libc::kill(kind_pid as libc::pid_t, libc::SIGKILL) };
     }
-    assert!(!timed_out, "PDEATHSIG feuerte nicht (Timeout) — Kind-PID {kind_pid} lebt");
+    assert!(
+        !timed_out,
+        "PDEATHSIG feuerte nicht (Timeout) — Kind-PID {kind_pid} lebt"
+    );
 }

@@ -182,17 +182,23 @@ mod tests {
         // Reihenfolge: Fenster anzeigen, Daemon-Toggle, Beenden
         assert_eq!(menu.len(), 3);
         // activate ist Box<dyn Fn> — der Aufruf braucht &mut (nicht &).
-        let MenuItem::Standard(fenster) = &mut menu[0] else { panic!("erstes Item") };
+        let MenuItem::Standard(fenster) = &mut menu[0] else {
+            panic!("erstes Item")
+        };
         assert_eq!(fenster.label, "Fenster anzeigen");
         (fenster.activate)(&mut tray);
         assert_eq!(rx.try_recv().unwrap(), TrayCmd::Show);
 
-        let MenuItem::Standard(toggle) = &mut menu[1] else { panic!("zweites Item") };
+        let MenuItem::Standard(toggle) = &mut menu[1] else {
+            panic!("zweites Item")
+        };
         assert!(toggle.enabled, "Toggle enabled bei laufendem Daemon");
         (toggle.activate)(&mut tray);
         assert_eq!(rx.try_recv().unwrap(), TrayCmd::ToggleDaemon);
 
-        let MenuItem::Standard(quit) = &mut menu[2] else { panic!("drittes Item") };
+        let MenuItem::Standard(quit) = &mut menu[2] else {
+            panic!("drittes Item")
+        };
         (quit.activate)(&mut tray);
         assert_eq!(rx.try_recv().unwrap(), TrayCmd::Quit);
     }
@@ -203,12 +209,16 @@ mod tests {
         let mut tray = CrashmonTray::new(tx);
         tray.daemon_running = true;
         let mut menu = tray.menu();
-        let MenuItem::Standard(toggle) = &mut menu[1] else { panic!() };
+        let MenuItem::Standard(toggle) = &mut menu[1] else {
+            panic!()
+        };
         assert_eq!(toggle.label, "Daemon stoppen");
         tray.daemon_running = false;
         tray.daemon_foreign = true;
         let mut menu = tray.menu();
-        let MenuItem::Standard(toggle) = &mut menu[1] else { panic!() };
+        let MenuItem::Standard(toggle) = &mut menu[1] else {
+            panic!()
+        };
         assert_eq!(toggle.label, "Daemon starten");
         assert!(!toggle.enabled, "Foreign -> disabled");
     }
@@ -218,7 +228,11 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut tray = CrashmonTray::new(tx);
         tray.activate(0, 0);
-        assert_eq!(rx.try_recv().unwrap(), TrayCmd::Show, "Icon-Klick zeigt Fenster");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            TrayCmd::Show,
+            "Icon-Klick zeigt Fenster"
+        );
     }
 
     #[test]

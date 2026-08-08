@@ -267,9 +267,7 @@ impl CrashmonGui {
         // zweiten spawnen (der Daemon selbst flockt weiterhin — der Check
         // ist Meldungs-Verbesserung, nicht Schutz).
         if let Some(pid) = probe_daemon_lock(&self.dump_dir) {
-            let label = pid
-                .map(|p| format!(" (PID {p})"))
-                .unwrap_or_default();
+            let label = pid.map(|p| format!(" (PID {p})")).unwrap_or_default();
             self.daemon = DaemonState::Foreign { pid };
             self.status = format!("Daemon läuft extern{label} — Reports werden live angezeigt");
             self.sync_tray();
@@ -392,7 +390,9 @@ impl CrashmonGui {
     /// DaemonState -> Tray (Menue-Label, disabled). NUR an Zustandsflanken
     /// aufrufen (handle.update = blocking D-Bus-Roundtrip).
     fn sync_tray(&mut self) {
-        let Some(handle) = &self.tray_handle else { return };
+        let Some(handle) = &self.tray_handle else {
+            return;
+        };
         let running = self.daemon.is_running();
         let foreign = matches!(self.daemon, DaemonState::Foreign { .. });
         let _ = handle.update(|t| {
@@ -538,47 +538,47 @@ impl CrashmonGui {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-            let now_us = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_micros() as u64)
-                .unwrap_or(0);
-            let filter = self.filter.trim().to_lowercase();
-            // Clone statt Borrow: waehrend der Iteration wird self ggf.
-            // mutiert (Loeschen per Rechtsklick).
-            let reports: Vec<(u64, Report)> = self
-                .reports
-                .iter()
-                .rev()
-                .filter(|(_ts, r)| {
-                    if filter.is_empty() {
-                        return true;
-                    }
-                    summarize(r).to_lowercase().contains(&filter)
-                        || format_ts_local(r.ts).to_lowercase().contains(&filter)
-                })
-                .map(|(ts, r)| (*ts, r.clone()))
-                .collect();
-            if reports.is_empty() {
-                // D6: Empty-State als zentrierter Block (erster Eindruck)
-                ui.add_space(24.0);
-                ui.vertical_centered(|ui| {
-                    if self.reports.is_empty() {
-                        ui.label(egui::RichText::new("Noch keine Reports").strong());
-                        ui.label(
-                            egui::RichText::new(
-                                "Daemon starten, dann erscheinen Crashes hier automatisch.",
-                            )
-                            .weak(),
-                        );
-                    } else {
-                        ui.weak("Keine Treffer für den Filter.");
-                    }
-                });
-            }
-            for (ts, report) in reports {
-                self.report_entry_ui(ui, ts, &report, now_us);
-            }
-        });
+                let now_us = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_micros() as u64)
+                    .unwrap_or(0);
+                let filter = self.filter.trim().to_lowercase();
+                // Clone statt Borrow: waehrend der Iteration wird self ggf.
+                // mutiert (Loeschen per Rechtsklick).
+                let reports: Vec<(u64, Report)> = self
+                    .reports
+                    .iter()
+                    .rev()
+                    .filter(|(_ts, r)| {
+                        if filter.is_empty() {
+                            return true;
+                        }
+                        summarize(r).to_lowercase().contains(&filter)
+                            || format_ts_local(r.ts).to_lowercase().contains(&filter)
+                    })
+                    .map(|(ts, r)| (*ts, r.clone()))
+                    .collect();
+                if reports.is_empty() {
+                    // D6: Empty-State als zentrierter Block (erster Eindruck)
+                    ui.add_space(24.0);
+                    ui.vertical_centered(|ui| {
+                        if self.reports.is_empty() {
+                            ui.label(egui::RichText::new("Noch keine Reports").strong());
+                            ui.label(
+                                egui::RichText::new(
+                                    "Daemon starten, dann erscheinen Crashes hier automatisch.",
+                                )
+                                .weak(),
+                            );
+                        } else {
+                            ui.weak("Keine Treffer für den Filter.");
+                        }
+                    });
+                }
+                for (ts, report) in reports {
+                    self.report_entry_ui(ui, ts, &report, now_us);
+                }
+            });
     }
 
     /// Zweizeiliger Listeneintrag (D3): Titel mit Severity-Punkt (D2),
@@ -973,7 +973,11 @@ mod tests {
     #[test]
     fn close_action_tabelle() {
         use CloseAction::*;
-        assert_eq!(close_action(false, false), Proceed, "kein Tray -> X beendet");
+        assert_eq!(
+            close_action(false, false),
+            Proceed,
+            "kein Tray -> X beendet"
+        );
         assert_eq!(close_action(false, true), Proceed);
         assert_eq!(close_action(true, false), Hide, "Tray -> X versteckt");
         assert_eq!(close_action(true, true), Proceed, "Tray-Quit -> raus");
@@ -1137,13 +1141,22 @@ mod tests {
         let cmds = app.handle_tray_cmd(TrayCmd::Show);
         assert!(!app.hidden, "Show macht sichtbar");
         assert!(!app.tray_dirty, "Show konsumiert das Alarm-Flag");
-        assert!(cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Visible(true))));
-        assert!(cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Focus)));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Visible(true)))
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Focus))
+        );
 
         app.handle_tray_cmd(TrayCmd::Quit);
         assert!(app.quitting, "Quit setzt quitting");
         let cmds = app.handle_tray_cmd(TrayCmd::Quit);
-        assert!(cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close))
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1159,7 +1172,8 @@ mod tests {
         assert!(!app.tray_dirty, "TrayLost konsumiert das Alarm-Flag");
         assert!(!app.hidden, "TrayLost macht das Fenster wieder sichtbar");
         assert!(
-            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Visible(true))),
+            cmds.iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Visible(true))),
             "verlorenes Tray -> Fenster zeigen"
         );
         assert!(app.status.contains("Tray verloren"), "{}", app.status);
@@ -1270,8 +1284,7 @@ impl eframe::App for CrashmonGui {
                     && matches!(self.daemon, DaemonState::Stopped)
                 {
                     self.daemon = DaemonState::Foreign { pid: Some(pid) };
-                    self.status =
-                        "Daemon läuft extern — Reports werden live angezeigt".into();
+                    self.status = "Daemon läuft extern — Reports werden live angezeigt".into();
                 } else {
                     self.status = msg;
                 }
