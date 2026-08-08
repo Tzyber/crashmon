@@ -310,10 +310,30 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         assert_eq!(probe_daemon_lock(&dir), None, "kein Lock -> frei");
 
-        // belegt: Datei + flock durch Testprozess halten
-        let file = fs::File::create(dir.join(".lock")).unwrap();
-        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(ret, 0, "Test-Lock muss gelingen");
+        // WARUM (Flake-Fix, nicht vereinfachen): Lock NICHT im Test-Thread
+        // flocken — parallele Test-Kinder (sleep 30 aus Spawn-Tests) erben
+        // beim fork->exec den flockten Test-FD, halten den Lock kurz und der
+        // Test-close gibt ihn dann nicht frei -> EWOULDBLOCK-Falsch-rot. Deshalb
+        // haelt ein SEPARATER flock-Prozess den Lock: kein fremder Test-Prozess
+        // erbt den FD, das Problem existiert nicht mehr.
+        fs::write(dir.join(".lock"), "").unwrap(); // flock-util oeffnet nicht mit create
+        let mut holder = std::process::Command::new("flock")
+            .arg(dir.join(".lock"))
+            .args(["-c", "sleep 30"])
+            // eigene Prozessgruppe: kill(-pid) erwischt auch das sleep-Kind
+            // (flock fork'd es) — sonst 30-s-Orphan mit flocktem FD und
+            // offener stdout-Pipe (cargo test | tail haengt).
+            .process_group(0)
+            .spawn()
+            .expect("flock-util (util-linux)");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while probe_daemon_lock(&dir).is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "Lock-Halter uebernimmt den Lock nicht"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         fs::write(dir.join(".lock"), std::process::id().to_string()).unwrap();
         assert_eq!(
             probe_daemon_lock(&dir),
@@ -322,6 +342,11 @@ mod tests {
         );
         fs::write(dir.join(".lock"), "").unwrap(); // leer (set_len(0)-Fenster)
         assert_eq!(probe_daemon_lock(&dir), Some(None), "belegt, PID leer");
+        // Aufraeumen: Lock-Halter beenden — ganze Prozessgruppe (flock +
+        // sein sleep-Kind), kein Orphan, Lock sofort frei.
+        // SAFETY: -pid ist die vom Test erzeugte Prozessgruppe (process_group).
+        unsafe { libc::kill(-(holder.id() as libc::pid_t), libc::SIGKILL) };
+        let _ = holder.wait();
         fs::remove_dir_all(&dir).ok();
     }
 
