@@ -18,7 +18,7 @@ fn pid_alive(pid: u32) -> bool {
             let state = stat
                 .rsplit(')')
                 .next()
-                .and_then(|s| s.trim().split_whitespace().next())
+                .and_then(|s| s.split_whitespace().next())
                 .unwrap_or("?");
             state != "Z"
         }

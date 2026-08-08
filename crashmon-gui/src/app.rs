@@ -226,11 +226,7 @@ impl CrashmonGui {
 
     /// Test-Konstruktor mit injiziertem Spawner + Bin-Pfad (k8).
     #[cfg(test)]
-    fn with_spawner(
-        state_dir: PathBuf,
-        spawn: Box<dyn Fn(&SpawnConfig) -> io::Result<Child>>,
-        daemon_bin: Option<PathBuf>,
-    ) -> Self {
+    fn with_spawner(state_dir: PathBuf, spawn: SpawnFn, daemon_bin: Option<PathBuf>) -> Self {
         let dump_dir = state_dir.clone();
         Self {
             state_dir,
@@ -677,14 +673,14 @@ impl CrashmonGui {
             if let Some(ts) = self.selected {
                 ui.weak(format_ts_local(ts));
             }
-            if ui.button("JSON kopieren").clicked() {
-                if let Some(report) = self.selected.and_then(|ts| self.reports.get(&ts)) {
-                    let json = serde_json::to_string_pretty(report).unwrap_or_default();
-                    ui.output_mut(|o| {
-                        o.commands.push(egui::output::OutputCommand::CopyText(json));
-                    });
-                    self.status = "Report-JSON kopiert".into();
-                }
+            if ui.button("JSON kopieren").clicked()
+                && let Some(report) = self.selected.and_then(|ts| self.reports.get(&ts))
+            {
+                let json = serde_json::to_string_pretty(report).unwrap_or_default();
+                ui.output_mut(|o| {
+                    o.commands.push(egui::output::OutputCommand::CopyText(json));
+                });
+                self.status = "Report-JSON kopiert".into();
             }
         });
         let Some(report) = self.selected.and_then(|ts| self.reports.get(&ts).cloned()) else {
@@ -964,6 +960,141 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+impl eframe::App for CrashmonGui {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(Duration::from_secs(1));
+        // Tray-Telegramme (Show/Quit/Toggle/TrayLost/TrayBack). Der
+        // Watcher-Verlust kommt als NATIVES ksni-Event (watcher_offline
+        // im D-Bus-Thread -> Sender) — kein is_closed-Poll noetig
+        // (Review: Handle-Closed ist nicht dasselbe wie Host-Wegfall;
+        // watcher_offline feuert bei StatusNotifierWatcher-Exit).
+        loop {
+            match self.tray_rx.try_recv() {
+                Ok(cmd) => {
+                    for c in self.handle_tray_cmd(cmd) {
+                        ctx.send_viewport_cmd(c);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // ksni-Thread tot (Service-Exit/Panic/Bus-Ausfall ohne
+                    // watcher_offline): sonst bleibt die GUI versteckt und
+                    // unerreichbar — TrayLost-Logik, einmal.
+                    if self.tray_active {
+                        self.tray_active = false;
+                        // Split-Form (fmt: Zeile >100, identisch zu TrayLost).
+                        self.status =
+                            "Tray verloren — Fenster wieder gezeigt, X beendet die App".into();
+                        if self.hidden {
+                            self.hidden = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // Alarm-Icon-Flanke: EIN Roundtrip, nur wenn scan() Neues fand
+        // (dirty). Bewusst ausserhalb des Debounce-Zweigs.
+        if self.tray_dirty {
+            self.tray_dirty = false;
+            if let Some(handle) = &self.tray_handle {
+                let _ = handle.update(|t| t.alarm = true);
+            }
+        }
+        // X-Klick: Hide (Tray) oder Proceed (App endet -> on_exit)
+        if ctx.input(|i| i.viewport().close_requested()) {
+            match close_action(self.tray_active, self.quitting) {
+                CloseAction::Hide => {
+                    self.hidden = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    // Wayland: set_visible ist unsupported (winit-0.30 Doku,
+                    // src/window.rs:970) — Minimized ist der einzige portable
+                    // Weg, das Fenster vom Bildschirm zu nehmen (xdg_toplevel
+                    // set_minimized). X11 verarbeitet beide Commands.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+                CloseAction::Proceed => { /* App beendet nach diesem Frame */ }
+            }
+        }
+        // D6: nur bei sichtbarem Fenster — ein verstecktes Viewport meldet
+        // keine garantierte letzte sichtbare Groesse ("Briefmarken"-Bug).
+        if !self.hidden {
+            self.window_size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+            if let Some(size) = self.window_size {
+                ctx.data_mut(|d| {
+                    d.insert_persisted(egui::Id::new(WINDOW_SIZE_KEY), size);
+                });
+            }
+        }
+        // Daemon-Reap: billig (try_wait), darf pro Frame laufen — kein
+        // Zombie, auch bei verstecktem Log/Fenster.
+        if let Some(msg) = poll_daemon(&mut self.daemon) {
+            // TOCTOU: zwei GUI-Starts — der Verlierer-Daemon stirbt sofort
+            // am W4-Flock. Dann ist der Sieger im Lock: Foreign statt
+            // generischer "exit status"-Meldung.
+            if self.just_spawned {
+                self.just_spawned = false;
+                if let Some(pid) = probe_daemon_lock(&self.dump_dir).flatten()
+                    && matches!(self.daemon, DaemonState::Stopped)
+                {
+                    self.daemon = DaemonState::Foreign { pid: Some(pid) };
+                    self.status = "Daemon läuft extern — Reports werden live angezeigt".into();
+                } else {
+                    self.status = msg;
+                }
+            } else {
+                self.status = msg;
+            }
+            // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
+            self.sync_tray();
+            ctx.request_repaint();
+        }
+        // W1: Scan/Log entprellt — nicht an der Framerate.
+        if self.last_poll.elapsed() >= POLL_INTERVAL {
+            self.last_poll = Instant::now();
+            // Foreign-Auto-Release NUR im Foreign-Zweig: Lock erneut
+            // proben; frei -> Stopped + "Bereit"-Meldung. poll_foreign
+            // reapt kein Kind (gibt keins), also kein Running/Stopping-
+            // Eingriff moeglich.
+            if matches!(self.daemon, DaemonState::Foreign { .. })
+                && let Some(msg) = poll_foreign(&mut self.daemon, &self.dump_dir)
+            {
+                self.status = msg;
+                // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
+                self.sync_tray();
+            }
+            self.poll(ctx);
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Panel::top("header").show(ui, |ui| self.header_ui(ui));
+        egui::Panel::bottom("status")
+            .default_size(24.0)
+            .show(ui, |ui| self.status_ui(ui));
+        if self.show_log {
+            egui::Panel::bottom("log")
+                .resizable(true)
+                .default_size(160.0)
+                .show(ui, |ui| self.log_ui(ui));
+        }
+        egui::Panel::left("reports")
+            .default_size(340.0)
+            .show(ui, |ui| self.list_ui(ui));
+        egui::CentralPanel::default().show(ui, |ui| self.detail_ui(ui));
+        self.knowledge_window(ui.ctx());
+    }
+
+    fn on_exit(&mut self) {
+        // Fenster zu -> Daemon immer mitbeenden (kein Waisen-Prozess).
+        // Blocking ist hier ok (Fenster bereits geschlossen). Die
+        // Fenstergroesse persistiert egui selbst (insert_persisted in logic).
+        shutdown_daemon(&mut self.daemon, Duration::from_secs(3));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,140 +1332,5 @@ mod tests {
         assert!(!app.hidden, "Disconnected zeigt das Fenster wieder");
         assert!(app.status.contains("Tray verloren"), "{}", app.status);
         fs::remove_dir_all(&dir).ok();
-    }
-}
-
-impl eframe::App for CrashmonGui {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_secs(1));
-        // Tray-Telegramme (Show/Quit/Toggle/TrayLost/TrayBack). Der
-        // Watcher-Verlust kommt als NATIVES ksni-Event (watcher_offline
-        // im D-Bus-Thread -> Sender) — kein is_closed-Poll noetig
-        // (Review: Handle-Closed ist nicht dasselbe wie Host-Wegfall;
-        // watcher_offline feuert bei StatusNotifierWatcher-Exit).
-        loop {
-            match self.tray_rx.try_recv() {
-                Ok(cmd) => {
-                    for c in self.handle_tray_cmd(cmd) {
-                        ctx.send_viewport_cmd(c);
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // ksni-Thread tot (Service-Exit/Panic/Bus-Ausfall ohne
-                    // watcher_offline): sonst bleibt die GUI versteckt und
-                    // unerreichbar — TrayLost-Logik, einmal.
-                    if self.tray_active {
-                        self.tray_active = false;
-                        // Split-Form (fmt: Zeile >100, identisch zu TrayLost).
-                        self.status =
-                            "Tray verloren — Fenster wieder gezeigt, X beendet die App".into();
-                        if self.hidden {
-                            self.hidden = false;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        // Alarm-Icon-Flanke: EIN Roundtrip, nur wenn scan() Neues fand
-        // (dirty). Bewusst ausserhalb des Debounce-Zweigs.
-        if self.tray_dirty {
-            self.tray_dirty = false;
-            if let Some(handle) = &self.tray_handle {
-                let _ = handle.update(|t| t.alarm = true);
-            }
-        }
-        // X-Klick: Hide (Tray) oder Proceed (App endet -> on_exit)
-        if ctx.input(|i| i.viewport().close_requested()) {
-            match close_action(self.tray_active, self.quitting) {
-                CloseAction::Hide => {
-                    self.hidden = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    // Wayland: set_visible ist unsupported (winit-0.30 Doku,
-                    // src/window.rs:970) — Minimized ist der einzige portable
-                    // Weg, das Fenster vom Bildschirm zu nehmen (xdg_toplevel
-                    // set_minimized). X11 verarbeitet beide Commands.
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-                CloseAction::Proceed => { /* App beendet nach diesem Frame */ }
-            }
-        }
-        // D6: nur bei sichtbarem Fenster — ein verstecktes Viewport meldet
-        // keine garantierte letzte sichtbare Groesse ("Briefmarken"-Bug).
-        if !self.hidden {
-            self.window_size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
-            if let Some(size) = self.window_size {
-                ctx.data_mut(|d| {
-                    d.insert_persisted(egui::Id::new(WINDOW_SIZE_KEY), size);
-                });
-            }
-        }
-        // Daemon-Reap: billig (try_wait), darf pro Frame laufen — kein
-        // Zombie, auch bei verstecktem Log/Fenster.
-        if let Some(msg) = poll_daemon(&mut self.daemon) {
-            // TOCTOU: zwei GUI-Starts — der Verlierer-Daemon stirbt sofort
-            // am W4-Flock. Dann ist der Sieger im Lock: Foreign statt
-            // generischer "exit status"-Meldung.
-            if self.just_spawned {
-                self.just_spawned = false;
-                if let Some(pid) = probe_daemon_lock(&self.dump_dir).flatten()
-                    && matches!(self.daemon, DaemonState::Stopped)
-                {
-                    self.daemon = DaemonState::Foreign { pid: Some(pid) };
-                    self.status = "Daemon läuft extern — Reports werden live angezeigt".into();
-                } else {
-                    self.status = msg;
-                }
-            } else {
-                self.status = msg;
-            }
-            // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
-            self.sync_tray();
-            ctx.request_repaint();
-        }
-        // W1: Scan/Log entprellt — nicht an der Framerate.
-        if self.last_poll.elapsed() >= POLL_INTERVAL {
-            self.last_poll = Instant::now();
-            // Foreign-Auto-Release NUR im Foreign-Zweig: Lock erneut
-            // proben; frei -> Stopped + "Bereit"-Meldung. poll_foreign
-            // reapt kein Kind (gibt keins), also kein Running/Stopping-
-            // Eingriff moeglich.
-            if matches!(self.daemon, DaemonState::Foreign { .. })
-                && let Some(msg) = poll_foreign(&mut self.daemon, &self.dump_dir)
-            {
-                self.status = msg;
-                // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
-                self.sync_tray();
-            }
-            self.poll(ctx);
-        }
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("header").show(ui, |ui| self.header_ui(ui));
-        egui::Panel::bottom("status")
-            .default_size(24.0)
-            .show(ui, |ui| self.status_ui(ui));
-        if self.show_log {
-            egui::Panel::bottom("log")
-                .resizable(true)
-                .default_size(160.0)
-                .show(ui, |ui| self.log_ui(ui));
-        }
-        egui::Panel::left("reports")
-            .default_size(340.0)
-            .show(ui, |ui| self.list_ui(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.detail_ui(ui));
-        self.knowledge_window(ui.ctx());
-    }
-
-    fn on_exit(&mut self) {
-        // Fenster zu -> Daemon immer mitbeenden (kein Waisen-Prozess).
-        // Blocking ist hier ok (Fenster bereits geschlossen). Die
-        // Fenstergroesse persistiert egui selbst (insert_persisted in logic).
-        shutdown_daemon(&mut self.daemon, Duration::from_secs(3));
     }
 }

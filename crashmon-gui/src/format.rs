@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(relative_ago(now - 5_000_000, now), "gerade eben");
         assert_eq!(relative_ago(now - 30_000_000, now), "vor 30 Sek");
         assert_eq!(relative_ago(now - 120_000_000, now), "vor 2 Min");
-        assert_eq!(relative_ago(now - 3 * 3600_000_000, now), "vor 3 Std");
+        assert_eq!(relative_ago(now - 3 * 3_600_000_000, now), "vor 3 Std");
         assert_eq!(relative_ago(now - 5 * 86_400_000_000, now), "vor 5 Tagen");
         // Zukunft (Uhr driftet): saturating -> "gerade eben"
         assert_eq!(relative_ago(now + 60_000_000, now), "gerade eben");
