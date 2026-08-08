@@ -48,6 +48,24 @@ const SEL_BG_ALPHA: u8 = 14;
 /// Injizierbare Spawn-Funktion (Tests nutzen einen Fake).
 type SpawnFn = Box<dyn Fn(&SpawnConfig) -> io::Result<Child>>;
 
+/// X-Klick-Entscheidung (pure, Review-Tabelle): ohne Tray beendet X die
+/// App (sonst waere sie unerreichbar); mit Tray versteckt X; waehrend
+/// quitting (Tray-Menue "Beenden") laeuft X weiter zum echten Exit —
+/// sonst kaeme man ueber das Tray nie raus.
+#[derive(PartialEq, Debug)]
+pub enum CloseAction {
+    Hide,
+    Proceed,
+}
+
+pub fn close_action(tray_active: bool, quitting: bool) -> CloseAction {
+    if tray_active && !quitting {
+        CloseAction::Hide
+    } else {
+        CloseAction::Proceed
+    }
+}
+
 pub struct CrashmonGui {
     state_dir: PathBuf,
     dump_dir: PathBuf,
@@ -800,6 +818,15 @@ mod tests {
     use super::*;
     use crash_daemon::event::EventKind;
     use std::fs;
+
+    #[test]
+    fn close_action_tabelle() {
+        use CloseAction::*;
+        assert_eq!(close_action(false, false), Proceed, "kein Tray -> X beendet");
+        assert_eq!(close_action(false, true), Proceed);
+        assert_eq!(close_action(true, false), Hide, "Tray -> X versteckt");
+        assert_eq!(close_action(true, true), Proceed, "Tray-Quit -> raus");
+    }
 
     /// Fake-Spawner: erzeugt einen echten sleep-Child, ignoriert cfg.
     fn fake_spawner(_cfg: &SpawnConfig) -> io::Result<Child> {
