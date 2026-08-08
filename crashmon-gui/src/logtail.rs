@@ -70,7 +70,7 @@ impl LogTail {
         self.partial
             .push_str(&String::from_utf8_lossy(&buf[..=idx]));
         for line in std::mem::take(&mut self.partial).lines() {
-            self.lines.push_back(line.to_owned());
+            self.lines.push_back(strip_ansi(line));
             while self.lines.len() > self.max {
                 self.lines.pop_front();
             }
@@ -81,6 +81,42 @@ impl LogTail {
     pub fn lines(&self) -> impl Iterator<Item = &str> {
         self.lines.iter().map(String::as_str)
     }
+}
+
+/// ANSI-Escapes aus einer Logzeile entfernen. Zweite Verteidigungslinie
+/// neben `--with_ansi(false)` im Daemon: Bestandslogs und ein per systemd
+/// gestarteter Daemon liefern weiter faerbenden Text, und ESC (0x1B) hat
+/// in den egui-Fonts kein Glyph — es erscheint als Tofu-Kaestchen.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: ESC [ params ... Endbyte im Bereich @..~
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if matches!(c, '\u{40}'..='\u{7e}') {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ] ... BEL (oder ESC \, dann greift der naechste Durchlauf)
+            Some(']') => {
+                for c in chars.by_ref() {
+                    if c == '\u{7}' || c == '\u{1b}' {
+                        break;
+                    }
+                }
+            }
+            // Einzelzeichen-Escape (ESC c o.ae.): verwerfen.
+            _ => {}
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -128,6 +164,19 @@ mod tests {
         tail.refresh(&path);
         assert_eq!(tail.lines().collect::<Vec<_>>(), vec!["x"]);
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn strips_ansi_from_lines() {
+        // Original-Zeile aus dem Daemon-Log (tracing-subscriber, ANSI an).
+        let raw = "\u{1b}[2m2026-08-07T19:55:34.780866Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m \
+                   \u{1b}[2mcrash_daemon::daemon\u{1b}[0m\u{1b}[2m:\u{1b}[0m beendet";
+        assert_eq!(
+            strip_ansi(raw),
+            "2026-08-07T19:55:34.780866Z  INFO crash_daemon::daemon: beendet"
+        );
+        // Zeilen ohne Escapes bleiben unveraendert.
+        assert_eq!(strip_ansi("nichts zu tun"), "nichts zu tun");
     }
 
     #[test]
