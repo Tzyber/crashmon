@@ -1,6 +1,6 @@
 # crashmon Wissensspeicher
 
-Eigene Notizen zu Fehlern und neuen Dingen — wird in der GUI angezeigt.
+Eigene Notizen zu Fehlern und neuen Dingen wird in der GUI angezeigt.
 Erweitere diese Datei mit deinem Editor; die GUI aktualisiert beim naechsten Poll.
 (Repo-Datei: wird beim Bauen eingebettet und bei Erststart nach
 `~/.local/share/crashmon/knowledge.md` kopiert — dort sammeln sich deine
