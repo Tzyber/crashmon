@@ -26,6 +26,10 @@ crash-daemon = { path = "..", version = "=0.1.0" }
 eframe = "=0.36.1"
 egui = "=0.36.1"
 libc = "=0.2.189"
+# Tray (StatusNotifierItem) — blocking API ohne tokio (Projekt-Philosophie).
+# icon_name bewusst leer: SNI gibt IconName Vorrang vor IconPixmap; ein
+# unbekannter Name kann je nach Host in "gar kein Icon" enden.
+ksni = { version = "=0.3.6", default-features = false, features = ["blocking", "async-io"] }
 serde_json = "=1.0.151"
 # k10: ensure_default_config schreibt TOML korrekt escaped (statt format!{:?})
 toml = "=1.1.4"

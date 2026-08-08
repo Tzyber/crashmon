@@ -8,3 +8,4 @@ pub mod logtail;
 pub mod reference;
 pub mod scan;
 pub mod state;
+pub mod tray;
