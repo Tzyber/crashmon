@@ -23,6 +23,7 @@ use crate::state::{
     DaemonState, SpawnConfig, find_daemon_bin, poll_daemon, shutdown_daemon, spawn_daemon,
     stop_daemon,
 };
+use crate::tray::{CrashmonTray, TrayCmd};
 use crash_daemon::event::{CrashEvent, EventKind};
 use crash_daemon::gpu::matcher::{Severity, event_severity};
 use crash_daemon::output::Report;
@@ -97,6 +98,19 @@ pub struct CrashmonGui {
     /// D6: Fenstergroesse merken (Persistenz via egui-Context-Daten —
     /// eframe persistiert die bei Exit automatisch).
     window_size: Option<egui::Vec2>,
+    /// Tray-Modus aktiv (Spawn erfolgreich). false -> X beendet die App.
+    tray_active: bool,
+    /// Tray-Telegramme (D-Bus-Thread -> GUI-Thread).
+    tray_rx: std::sync::mpsc::Receiver<TrayCmd>,
+    /// ksni-Handle fuer handle.update() an Zustandsflanken (D-Bus-Roundtrip!).
+    /// `blocking::Handle` — das root-`ksni::Handle` ist die async-Variante.
+    tray_handle: Option<ksni::blocking::Handle<CrashmonTray>>,
+    /// Fenster gerade versteckt (Tray-Betrieb).
+    hidden: bool,
+    /// Tray "Beenden" empfangen -> naechster Close wird echter Exit.
+    quitting: bool,
+    /// scan() setzt das Flag; logic() macht den update()-Roundtrip daraus.
+    tray_dirty: bool,
 }
 
 impl CrashmonGui {
@@ -113,6 +127,20 @@ impl CrashmonGui {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
+
+        let (tray_tx, tray_rx) = std::sync::mpsc::channel();
+        // `blocking::TrayMethods` — das root-`TrayMethods::spawn` ist async
+        // (Future, kein Result -> wuerde nicht kompilieren).
+        let (tray_active, tray_handle) =
+            match ksni::blocking::TrayMethods::spawn(CrashmonTray::new(tray_tx)) {
+                Ok(handle) => (true, Some(handle)),
+                Err(e) => {
+                    eprintln!(
+                        "crashmon-gui: Tray nicht verfuegbar ({e}) — Fenster-X beendet die App"
+                    );
+                    (false, None)
+                }
+            };
 
         let mut gui = Self {
             state_dir,
@@ -134,6 +162,12 @@ impl CrashmonGui {
             show_knowledge: false,
             notify: true,
             window_size: None,
+            tray_active,
+            tray_rx,
+            tray_handle,
+            hidden: false,
+            quitting: false,
+            tray_dirty: false,
         };
         // W1: Wissensspeicher EINMAL beim Start laden (nicht im Poll-Pfad).
         gui.refresh_knowledge();
@@ -211,6 +245,12 @@ impl CrashmonGui {
             show_knowledge: false,
             notify: false, // Tests spawnen kein notify-send
             window_size: None,
+            tray_active: false,
+            tray_rx: std::sync::mpsc::channel().1,
+            tray_handle: None,
+            hidden: false,
+            quitting: false,
+            tray_dirty: false,
         }
     }
 
@@ -239,11 +279,15 @@ impl CrashmonGui {
             }
             Err(e) => self.status = format!("Start fehlgeschlagen: {e}"),
         }
+        // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
+        self.sync_tray();
     }
 
     fn stop(&mut self) {
         stop_daemon(&mut self.daemon);
         self.status = "Daemon wird gestoppt (SIGTERM, Drain + Flush)...".into();
+        // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
+        self.sync_tray();
     }
 
     fn daemon_pid(&self) -> Option<u32> {
@@ -254,6 +298,72 @@ impl CrashmonGui {
             DaemonState::Stopped => None,
             DaemonState::Foreign { .. } => None, // fremde PID ist nur Diagnose
         }
+    }
+
+    /// Tray-Telegramm verarbeiten. Liefert die Viewport-Commands, die der
+    /// Aufrufer an egui schickt (Unit-testbar ohne echte Window-Session).
+    fn handle_tray_cmd(&mut self, cmd: TrayCmd) -> Vec<egui::ViewportCommand> {
+        let mut cmds = Vec::new();
+        match cmd {
+            TrayCmd::Show => {
+                self.hidden = false;
+                cmds.push(egui::ViewportCommand::Visible(true));
+                // Visible allein mappt nur; Focus holt nach vorn (Wayland
+                // kann verweigern — xdg-activation, dokumentiert).
+                cmds.push(egui::ViewportCommand::Focus);
+                cmds.push(egui::ViewportCommand::Minimized(false));
+                // Alarm zuruecksetzen: der User hat jetzt hingesehen
+                // (Sichtbar-Zeitpunkt-Marke der Spec). Kein D-Bus im
+                // Tick, aber eine Flanke — ok. Im Test ist handle=None.
+                if let Some(handle) = &self.tray_handle {
+                    let _ = handle.update(|t| t.alarm = false);
+                }
+            }
+            TrayCmd::ToggleDaemon => {
+                if self.daemon.is_running() {
+                    self.stop();
+                } else {
+                    self.mount();
+                }
+            }
+            TrayCmd::Quit => {
+                if !self.quitting {
+                    self.quitting = true;
+                    // Selbstheilend: verpufft Close, ist das Fenster sichtbar
+                    // und quitting==true — der naechste X-Klick liefert
+                    // Proceed. Absicht, nicht Zufall — nicht vereinfachen.
+                    cmds.push(egui::ViewportCommand::Visible(true));
+                }
+                cmds.push(egui::ViewportCommand::Close);
+            }
+            TrayCmd::TrayLost => {
+                // StatusNotifierWatcher weg: Fenster wieder zeigen — die
+                // Statuszeile im versteckten Fenster sieht niemand.
+                self.tray_active = false;
+                self.status = "Tray verloren — Fenster wieder gezeigt, X beendet die App".into();
+                if self.hidden {
+                    self.hidden = false;
+                    cmds.push(egui::ViewportCommand::Visible(true));
+                }
+            }
+            TrayCmd::TrayBack => {
+                self.tray_active = true;
+                self.status = "Tray wieder verfügbar".into();
+            }
+        }
+        cmds
+    }
+
+    /// DaemonState -> Tray (Menue-Label, disabled). NUR an Zustandsflanken
+    /// aufrufen (handle.update = blocking D-Bus-Roundtrip).
+    fn sync_tray(&mut self) {
+        let Some(handle) = &self.tray_handle else { return };
+        let running = self.daemon.is_running();
+        let foreign = matches!(self.daemon, DaemonState::Foreign { .. });
+        let _ = handle.update(|t| {
+            t.daemon_running = running;
+            t.daemon_foreign = foreign;
+        });
     }
 
     /// Entprellter Poll (W1): nur alle 500 ms Verzeichnis/Log — die
@@ -290,6 +400,12 @@ impl CrashmonGui {
             );
             if self.notify {
                 self.notify_new_report();
+            }
+            // Alarm-Icon nur fuer Reports, die der User noch nicht gesehen
+            // hat (Spec: Marke bei Hide/Show). Bei sichtbarem Fenster
+            // schaut er gerade zu — kein Alarm.
+            if self.hidden {
+                self.tray_dirty = true; // logic() macht daraus den update()-Roundtrip
             }
             ctx.request_repaint();
         }
@@ -954,23 +1070,90 @@ mod tests {
         shutdown_daemon(&mut app.daemon, Duration::from_secs(3));
         fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn tray_show_und_quit_steuern_fenster() {
+        let dir = temp_state("traycmd");
+        let mut app = CrashmonGui::with_spawner(dir.clone(), Box::new(fake_spawner), None);
+        app.hidden = true;
+        let cmds = app.handle_tray_cmd(TrayCmd::Show);
+        assert!(!app.hidden, "Show macht sichtbar");
+        assert!(cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Visible(true))));
+        assert!(cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Focus)));
+
+        app.handle_tray_cmd(TrayCmd::Quit);
+        assert!(app.quitting, "Quit setzt quitting");
+        let cmds = app.handle_tray_cmd(TrayCmd::Quit);
+        assert!(cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Close)));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tray_lost_zeigt_fenster_wieder() {
+        let dir = temp_state("traystraylost");
+        let mut app = CrashmonGui::with_spawner(dir.clone(), Box::new(fake_spawner), None);
+        app.tray_active = true;
+        app.hidden = true;
+        let cmds = app.handle_tray_cmd(TrayCmd::TrayLost);
+        assert!(!app.tray_active, "TrayLost deaktiviert Tray-Modus");
+        assert!(!app.hidden, "TrayLost macht das Fenster wieder sichtbar");
+        assert!(
+            cmds.iter().any(|c| matches!(c, egui::ViewportCommand::Visible(true))),
+            "verlorenes Tray -> Fenster zeigen"
+        );
+        assert!(app.status.contains("Tray verloren"), "{}", app.status);
+        fs::remove_dir_all(&dir).ok();
+    }
 }
 
 impl eframe::App for CrashmonGui {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_secs(1));
-        // D6: Fenstergroesse fuer on_exit merken
-        // D6: Fenstergroesse merken (egui persistiert die bei Exit).
-        self.window_size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
-        if let Some(size) = self.window_size {
-            ctx.data_mut(|d| {
-                d.insert_persisted(egui::Id::new(WINDOW_SIZE_KEY), size);
-            });
+        // Tray-Telegramme (Show/Quit/Toggle/TrayLost/TrayBack). Der
+        // Watcher-Verlust kommt als NATIVES ksni-Event (watcher_offline
+        // im D-Bus-Thread -> Sender) — kein is_closed-Poll noetig
+        // (Review: Handle-Closed ist nicht dasselbe wie Host-Wegfall;
+        // watcher_offline feuert bei StatusNotifierWatcher-Exit).
+        while let Ok(cmd) = self.tray_rx.try_recv() {
+            for c in self.handle_tray_cmd(cmd) {
+                ctx.send_viewport_cmd(c);
+            }
+        }
+        // Alarm-Icon-Flanke: EIN Roundtrip, nur wenn scan() Neues fand
+        // (dirty). Bewusst ausserhalb des Debounce-Zweigs.
+        if self.tray_dirty {
+            self.tray_dirty = false;
+            if let Some(handle) = &self.tray_handle {
+                let _ = handle.update(|t| t.alarm = true);
+            }
+        }
+        // X-Klick: Hide (Tray) oder Proceed (App endet -> on_exit)
+        if ctx.input(|i| i.viewport().close_requested()) {
+            match close_action(self.tray_active, self.quitting) {
+                CloseAction::Hide => {
+                    self.hidden = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+                CloseAction::Proceed => { /* App beendet nach diesem Frame */ }
+            }
+        }
+        // D6: nur bei sichtbarem Fenster — ein verstecktes Viewport meldet
+        // keine garantierte letzte sichtbare Groesse ("Briefmarken"-Bug).
+        if !self.hidden {
+            self.window_size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+            if let Some(size) = self.window_size {
+                ctx.data_mut(|d| {
+                    d.insert_persisted(egui::Id::new(WINDOW_SIZE_KEY), size);
+                });
+            }
         }
         // Daemon-Reap: billig (try_wait), darf pro Frame laufen — kein
         // Zombie, auch bei verstecktem Log/Fenster.
         if let Some(msg) = poll_daemon(&mut self.daemon) {
             self.status = msg;
+            // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
+            self.sync_tray();
             ctx.request_repaint();
         }
         // W1: Scan/Log entprellt — nicht an der Framerate.
