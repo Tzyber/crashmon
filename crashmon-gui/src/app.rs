@@ -20,8 +20,8 @@ use crate::logtail::LogTail;
 use crate::reference::{knowledge_default, reference_lines};
 use crate::scan::scan_dir;
 use crate::state::{
-    DaemonState, SpawnConfig, find_daemon_bin, poll_daemon, shutdown_daemon, spawn_daemon,
-    stop_daemon,
+    DaemonState, SpawnConfig, find_daemon_bin, poll_daemon, poll_foreign, probe_daemon_lock,
+    shutdown_daemon, spawn_daemon, stop_daemon,
 };
 use crate::tray::{CrashmonTray, TrayCmd};
 use crash_daemon::event::{CrashEvent, EventKind};
@@ -111,6 +111,11 @@ pub struct CrashmonGui {
     quitting: bool,
     /// scan() setzt das Flag; logic() macht den update()-Roundtrip daraus.
     tray_dirty: bool,
+    /// TOCTOU-Nachlauf: mount() setzt es nach erfolgreichem EIGENEM Spawn;
+    /// logic() konsumiert es genau einmal, wenn der Daemon sofort stirbt —
+    /// dann prueft sie den W4-Flock auf den Sieger (Foreign) statt der
+    /// generischen "exit status"-Meldung.
+    just_spawned: bool,
 }
 
 impl CrashmonGui {
@@ -168,9 +173,11 @@ impl CrashmonGui {
             hidden: false,
             quitting: false,
             tray_dirty: false,
+            just_spawned: false,
         };
         // W1: Wissensspeicher EINMAL beim Start laden (nicht im Poll-Pfad).
         gui.refresh_knowledge();
+        gui.mount(); // Autostart: Tray-Betrieb ohne laufenden Daemon ist sinnlos
         gui
     }
 
@@ -251,10 +258,23 @@ impl CrashmonGui {
             hidden: false,
             quitting: false,
             tray_dirty: false,
+            just_spawned: false,
         }
     }
 
     fn mount(&mut self) {
+        // Single-Instance-UX: W4-Lock des Daemons pruefen, bevor wir einen
+        // zweiten spawnen (der Daemon selbst flockt weiterhin — der Check
+        // ist Meldungs-Verbesserung, nicht Schutz).
+        if let Some(pid) = probe_daemon_lock(&self.dump_dir) {
+            let label = pid
+                .map(|p| format!(" (PID {p})"))
+                .unwrap_or_default();
+            self.daemon = DaemonState::Foreign { pid };
+            self.status = format!("Daemon läuft extern{label} — Reports werden live angezeigt");
+            self.sync_tray();
+            return;
+        }
         let config = match ensure_default_config(&self.state_dir) {
             Ok(c) => c,
             Err(e) => {
@@ -275,6 +295,10 @@ impl CrashmonGui {
         match (self.spawn)(&cfg) {
             Ok(child) => {
                 self.daemon = DaemonState::Running { child };
+                // TOCTOU-Nachlauf (s.u. logic()): nur der EIGENE Spawn
+                // darf den Foreign-Wechsel ausloesen, wenn er sofort am
+                // W4-Flock stirbt.
+                self.just_spawned = true;
                 self.status = format!("Daemon läuft (PID {})", self.daemon_pid().unwrap_or(0));
             }
             Err(e) => self.status = format!("Start fehlgeschlagen: {e}"),
@@ -1056,6 +1080,28 @@ mod tests {
     }
 
     #[test]
+    fn mount_externen_daemon_erkennt_als_foreign() {
+        use std::os::unix::io::AsRawFd; // libc::flock braucht den FD
+        let dir = temp_state("foreign");
+        // Lock von aussen belegen (simuliert fremden Daemon)
+        let file = fs::File::create(dir.join(".lock")).unwrap();
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let mut app = CrashmonGui::with_spawner(dir.clone(), Box::new(fake_spawner), None);
+        app.mount();
+        assert!(
+            matches!(app.daemon, DaemonState::Foreign { .. }),
+            "mount darf keinen zweiten Daemon spawnen (status: {})",
+            app.status
+        );
+        assert!(
+            app.status.contains("läuft extern"),
+            "Status zeigt externen Daemon: {}",
+            app.status
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn mount_sets_running_with_fake_spawner() {
         let dir = temp_state("mount");
         let mut app = CrashmonGui::with_spawner(
@@ -1151,7 +1197,23 @@ impl eframe::App for CrashmonGui {
         // Daemon-Reap: billig (try_wait), darf pro Frame laufen — kein
         // Zombie, auch bei verstecktem Log/Fenster.
         if let Some(msg) = poll_daemon(&mut self.daemon) {
-            self.status = msg;
+            // TOCTOU: zwei GUI-Starts — der Verlierer-Daemon stirbt sofort
+            // am W4-Flock. Dann ist der Sieger im Lock: Foreign statt
+            // generischer "exit status"-Meldung.
+            if self.just_spawned {
+                self.just_spawned = false;
+                if let Some(pid) = probe_daemon_lock(&self.dump_dir).flatten()
+                    && matches!(self.daemon, DaemonState::Stopped)
+                {
+                    self.daemon = DaemonState::Foreign { pid: Some(pid) };
+                    self.status =
+                        "Daemon läuft extern — Reports werden live angezeigt".into();
+                } else {
+                    self.status = msg;
+                }
+            } else {
+                self.status = msg;
+            }
             // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
             self.sync_tray();
             ctx.request_repaint();
@@ -1159,6 +1221,17 @@ impl eframe::App for CrashmonGui {
         // W1: Scan/Log entprellt — nicht an der Framerate.
         if self.last_poll.elapsed() >= POLL_INTERVAL {
             self.last_poll = Instant::now();
+            // Foreign-Auto-Release NUR im Foreign-Zweig: Lock erneut
+            // proben; frei -> Stopped + "Bereit"-Meldung. poll_foreign
+            // reapt kein Kind (gibt keins), also kein Running/Stopping-
+            // Eingriff moeglich.
+            if matches!(self.daemon, DaemonState::Foreign { .. })
+                && let Some(msg) = poll_foreign(&mut self.daemon, &self.dump_dir)
+            {
+                self.status = msg;
+                // Zustandsflanke -> Tray-Label synchron (Menue-Rendering).
+                self.sync_tray();
+            }
             self.poll(ctx);
         }
     }
