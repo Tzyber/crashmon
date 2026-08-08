@@ -119,6 +119,10 @@ und überwacht weiterhin den Report-Ordner. Beenden nur über das Tray-Menü.
 
 - KDE Plasma/COSMIC: funktioniert out of the box.
 - GNOME: AppIndicator-Extension erforderlich.
+- Wayland: Fenster-X minimiert die GUI (wirklich unsichtbar machen kann kein
+  Toolkit auf Wayland — winit `set_visible` ist dort unsupported); wieder
+  öffnen per Klick aufs Taskbar-Icon oder das Tray-Menü „Fenster anzeigen"
+  (letzteres nur auf X11 wirksam — Wayland kennt kein „unminimize").
 - Ohne StatusNotifierHost startet die GUI ohne Tray — Fenster-X beendet die App
   wie gewohnt.
 - Der Daemon startet automatisch mit der GUI; läuft bereits ein externer Daemon
