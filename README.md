@@ -22,6 +22,8 @@ was der Fehler bedeutet. Bei neuen Reports kommt eine Desktop-Notification.
 Bei unbekannten Fehlern öffnet ein Knopf die vorformulierte Suche im Browser,
 und was du herausfindest, kannst du in deinen Wissensspeicher schreiben.
 
+![Die crashmon-GUI mit zwei Reports: links die Liste, rechts die Detailansicht eines SIGABRT mit Programmpfad, Signal, Core-Datei und Erklaerung](docs/images/gui-report.png)
+
 ## Was es kann
 
 - **Daemon** (headless, unprivilegiert): liest das systemd-Journal (Coredumps,
@@ -250,8 +252,12 @@ openspec/specs/       Capability-Spezifikationen (SDD)
 Ich habe Abstürze auf meinem eigenen Rechner lange schlicht übersehen. Nicht
 weil es keine Spuren gab, sondern weil die Spuren im Journal liegen, und das
 Journal ist unübersichtlich. Man muss vorher wissen, wonach man sucht, um es
-zu finden. Wenn ich die Zeile dann irgendwann hatte, stand da ein Code, eine
-Zahl, ein Signalname, und ich war genauso schlau wie vorher. Also googeln,
+zu finden. So sieht ein einzelner Absturz dort aus:
+
+![journalctl-Ausgabe im verbose-Format: ein einzelner Coredump als seitenlange Liste von Feldern](docs/images/journal-verbose.png)
+
+Wenn ich die Zeile dann irgendwann hatte, stand da ein Code, eine Zahl, ein
+Signalname, und ich war genauso schlau wie vorher. Also googeln,
 Forenthreads von 2019, Treiber-Quelltext, halbe Antworten.
 
 crashmon ist aus dieser Reihenfolge entstanden: erst wissen, dass überhaupt
