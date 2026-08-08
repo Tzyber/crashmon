@@ -180,17 +180,22 @@ mod tests {
     fn knowledge_default_has_sections() {
         let d = knowledge_default();
         assert!(d.contains("Xid-Codes"));
-        assert!(d.contains("Typische Kernel-/Treiber-Meldungen"));
-        assert!(d.contains("Troubleshooting"));
+        assert!(d.contains("AMD (amdgpu)"));
+        assert!(d.contains("Out of Memory"));
+        assert!(d.contains("Vorgehen bei wiederholten GPU-Resets"));
+        // Quellenmarken vorhanden
+        assert!(d.contains("[doc]"));
+        assert!(d.contains("[obs]"));
+        assert!(d.contains("[?]"));
         // Verifizierte Kerninhalte
         assert!(d.contains("GPU reset begin"));
         assert!(d.contains("Out of memory: Killed process"));
         assert!(d.contains("gdb <exe> <core-datei>"));
+        assert!(d.contains("systemd-coredump"));
         // User-Ergaenzungen (Signale, Gaming, Panics, coredumpctl)
         assert!(d.contains("SIGSEGV"));
         assert!(d.contains("SIGABRT"));
-        assert!(d.contains("Weitere Xid-Codes"));
-        assert!(d.contains("Gaming / Proton / Vulkan"));
+        assert!(d.contains("Gaming, Proton, Vulkan"));
         assert!(d.contains("DXVK: Device lost"));
         assert!(d.contains("App-Panics"));
         assert!(d.contains("coredumpctl debug"));
