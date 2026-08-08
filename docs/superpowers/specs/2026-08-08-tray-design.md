@@ -31,11 +31,23 @@ beim GUI-Start automatisch.
 - `spawn()` beim GUI-Start. `Err(WontShow)` („no StatusNotifierHost exists",
   verifiziert in ksni-Source) → kein Tray-Modus: Fenster-X beendet die App
   wie bisher, Statuszeile „Tray nicht verfügbar — Fenster-X beendet die App".
-- **Tray-Verlust zur Laufzeit** (D-Bus-Neustart, Host-Wegfall): `Handle::
-  update()` liefert dann Fehler/None — als Flanke behandeln: `tray_active =
-  false` + Statuszeile „Tray verloren — Fenster-X beendet die App wieder".
-  Sonst wird die versteckte GUI zum unerreichbaren Prozess (einziger
-  Exit-Weg war das Tray).
+- **Tray-Verlust zur Laufzeit** (D-Bus-Neustart, Host-Wegfall): der
+  Relevanzfall ist hidden + stabiler Daemon + keine Reports — tagelang
+  keine Zustandsflanke. `update()`-Fehler reicht als Erkennung nicht
+  (setzt Flanke voraus, die nie kommt). Stattdessen **Liveness-Check:
+  `Handle::is_closed()` alle 2 s** (lokaler Flag, kein D-Bus-Roundtrip;
+  nicht im 500-ms-Tick). Bei `true`:
+  - `tray_active = false`
+  - **wenn `hidden`: `Visible(true)`** — einzige Reaktion, die den
+    Prozess wieder erreichbar macht (Statuszeile im versteckten Fenster
+    sieht niemand)
+  - Statuszeile „Tray verloren — Fenster wieder gezeigt, X beendet die
+    App"
+- **Bekanntes Risiko:** `Handle::update()` ist blockierend (D-Bus-
+  Roundtrip). Hängt der Bus (Host tot, Verbindung offen), hängt der
+  GUI-Thread mit — im Hidden-Zustand unsichtbar. Kein Timeout drumherum
+  (ksni bietet keinen); Update bleibt strikt auf Zustandsflanken + den
+  alle-2-s-Liveness-Zweig.
 
 ## Daemon-Lifecycle
 
@@ -51,10 +63,17 @@ beim GUI-Start automatisch.
     - Header-Button disabled, Label „läuft extern (PID x)"
     - Tray-Toggle ebenso
     - `on_exit`/`shutdown_daemon`/PDEATHSIG fassen ihn nicht an (kein Kind)
+  - **Semantik:** `is_running() == false` — die Frage heißt faktisch „haben
+    wir ein Kind?"; der Button hängt am disabled-Pfad, nicht am Label.
+    Jedes `match` über `DaemonState` bricht mit dem neuen Arm — erwartet,
+    der Compiler listet alle Stellen.
   - `Foreign` wird automatisch verlassen: im Poll-Tick **Flock-Probe
     erneut** (`LOCK_EX|LOCK_NB` — autoritativ, statt PID-Lebendigkeits-Check:
     PID-Reuse und leere Lock-Datei machen den PID-Check unzuverlässig).
     Frei → zurück zu `Stopped` + Status „Externer Daemon beendet".
+  - **Invariante:** die Flock-Probe läuft AUSSCHLIESSLICH im `Foreign`-
+    Zweig — nie bei `Running`/`Stopping` (der eigene Daemon hält den Lock;
+    eine Probe dort kippte den Zustand nach `Foreign`).
   - TOCTOU (zwei gleichzeitige GUI-Starts proben beide „frei"): der Verlierer
     spawnt, sein Daemon stirbt am W4-Flock sofort. Im Exit-Pfad von
     `poll_daemon` kurz nach Autostart erneut proben → wenn belegt:
@@ -97,6 +116,10 @@ beim GUI-Start automatisch.
   verpuffen) und erst danach `send_viewport_cmd(Close)` → App endet →
   `on_exit` → `shutdown_daemon`. Quit aus dem Hidden-Zustand ist der
   typische Tray-Moment — im Smoke-Test explizit prüfen.
+- **Selbstheilend:** verpufft `Close` trotzdem, ist das Fenster jetzt
+  sichtbar und `quitting == true` — der nächste X-Klick liefert `Proceed`.
+  Absicht, nicht Zufall — Kommentar an die Stelle, damit es niemand
+  „vereinfacht".
 
 ## Tray
 
@@ -145,15 +168,20 @@ beim GUI-Start automatisch.
 - **PDEATHSIG-E2E als eigenes `[[bin]] pdeath_helper`** (kein env-Flag im
   Produktions-`main()` — Testcode aus dem Produktionspfad halten, k8-
   Lehre): Helper spawnt Kind (mit `spawn_daemon`-pre_exec), schreibt PID
-  auf stdout, `SIGKILL` auf sich selbst. Test (via
-  `env!("CARGO_BIN_EXE_pdeath_helper")`) pollt, ob das Kind stirbt —
-  **mit Timeout** (sonst hängt CI, wenn PDEATHSIG nicht feuert).
+  auf stdout, **`stdout().flush()` + Fehler prüfen** (Pipe ist
+  block-buffered — SIGKILL flusht nichts; ohne Flush liest der Test eine
+  leere Pipe und schlägt fehl, obwohl PDEATHSIG korrekt wäre), DANN
+  `SIGKILL` auf sich selbst — Reihenfolge: spawn → PID schreiben →
+  Flush → Kill. Test (via `env!("CARGO_BIN_EXE_pdeath_helper")`) pollt,
+  ob das Kind stirbt — **mit Timeout** (sonst hängt CI, wenn PDEATHSIG
+  nicht feuert).
   **Timeout-Pfad räumt auf:** wenn PDEATHSIG fehlschlägt (der zu testende
   Fall), läuft der Grandchild weiter und hält den Flock — der Test muss
   ihn dann per SIGKILL beenden + reapen, sonst verfälscht er den nächsten
   Lauf. Helper nutzt temp-dump_dir/temp-Config, nie den echten state_dir.
-- Bestandstests unverändert grün (state.rs inkl. `DaemonState::Foreign`
-  in der Zustandsmaschine, kittest, scan).
+- Bestandstests grün nach den erwarteten `match`-Erweiterungen um
+  `DaemonState::Foreign` (state.rs, kittest, scan — die neuen Arme sind
+  vom Compiler vorgegeben).
 - Manueller Smoke auf dem echten Stack (KDE Wayland):
   X → Hide, Tray zeigen (Fokus-Verhalten)/Beenden, kill -9 auf GUI →
   `pgrep crashmon` leer.
