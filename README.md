@@ -1,74 +1,84 @@
-# crashmon: Linux Crash-Daemon & GUI
+# crashmon
 
-**Dein Crash versteht dich nicht, aber du kannst ihn verstehen lernen.**
+Crash-Daemon für Linux. Überwacht systemd-coredump und das Journal und macht
+daraus lesbare Reports. Mit Desktop-GUI, ohne Root.
 
-Wenn auf Linux etwas abstürzt, bleibt meist nur ein kryptischer Log-Eintrag:
-`NVRM: Xid 31`, `amdgpu: GPU reset begin!`, `Out of memory: Killed process 1234`.
-Was heißt das? Wer war das? Und was macht man jetzt?
+> Die Oberfläche ist auf Deutsch.
 
-crashmon beantwortet das automatisch. Es überwacht das System passiv
-(~0 % Idle-CPU), erkennt Crashes, GPU-Hänger und OOM-Kills, bündelt sie zu
-einem verständlichen Report und erklärt dir, was passiert ist. Neue
-Crashes meldet es per Desktop-Notification — und bei unbekannten Fehlern
-öffnet ein Knopf die vorformulierte Suche im Browser, damit deine
-Wissensdatenbank mit jedem Fehler wächst.
+Wenn auf Linux etwas abstürzt, bleibt meist eine einzelne Zeile irgendwo im
+Journal:
 
-## Die Idee dahinter
+```
+NVRM: Xid 31
+amdgpu: GPU reset begin!
+Out of memory: Killed process 1234
+```
 
-Crashes sind selten dokumentiert, und wenn, dann verstreut über Foren,
-Doku-Seiten und Treiber-Quelltexte. Dieses Tool entstand aus dem Frust,
-beim eigenen Crash vor einem Xid-Code zu sitzen, ohne zu wissen, was er
-bedeutet. Statt jedes Mal zu googeln, soll das System selbst sprechen:
-
-- **Erfassen**: was ist passiert? (Coredump, OOM, GPU-Reset, Xid, Wedged)
-- **Verstehen**: was bedeutet das? (eingebaute Referenz + Wissensspeicher)
-- **Lernen**: unbekannte Fehler per Knopf im Browser nachschlagen und
-  selbst in die Wissensdatei übernehmen; Community-Beiträge per
-  Pull-Request gegen die Repo-Wissensdatei (Format: CONTRIBUTING.md)
+Man muss wissen, dass es sie gibt, man muss sie finden, und dann sagt sie
+einem immer noch nichts. crashmon nimmt einem beides ab: es liest passiv mit
+(praktisch 0 % CPU im Leerlauf), erkennt Coredumps, OOM-Kills und GPU-Hänger,
+fasst zusammengehörende Ereignisse zu einem Report zusammen und erklärt dazu,
+was der Fehler bedeutet. Bei neuen Reports kommt eine Desktop-Notification.
+Bei unbekannten Fehlern öffnet ein Knopf die vorformulierte Suche im Browser,
+und was du herausfindest, kannst du in deinen Wissensspeicher schreiben.
 
 ## Was es kann
 
-- **Daemon** (headless, unprivilegiert): liest systemd-Journal (Coredumps,
-  OOM, GPU-Resets aller Hersteller) + Netlink-Uevents (GPU-WEDGED),
-  korreliert (Xid-Bursts = 1 Report, PID-Matching) und schreibt atomare
-  JSON-Reports
-- **GUI** (egui/eframe): „Daemon mounten"-Knopf (kein Root, kein systemctl),
-  Live-Report-Liste, formatierte Detail-Ansicht, Daemon-Log, JSON-Kopieren
+- **Daemon** (headless, unprivilegiert): liest das systemd-Journal (Coredumps,
+  OOM, GPU-Resets aller Hersteller) und Netlink-Uevents (GPU-WEDGED),
+  korreliert zusammengehörende Ereignisse (Xid-Bursts werden ein Report,
+  PID-Matching) und schreibt atomare JSON-Reports.
+- **GUI** (egui/eframe): startet und stoppt den Daemon ohne Root und ohne
+  systemctl, zeigt die Reports live, formatiert statt roh, dazu Daemon-Log
+  und einen Knopf zum JSON-Kopieren.
+- **Tray-Modus**: Fenster zu, GUI läuft weiter und meldet neue Crashes.
 - **Wissensbasis**: eingebaute Referenz (Xid-Codes, Signale, typische
-  Meldungen) + lokaler, editierbarer Wissensspeicher (`knowledge.md`), der
-  sich automatisch um neue Vorlagen-Sektionen erweitert; unbekannte Fehler
-  werden per „Im Browser suchen"-Knopf nachgeschlagen (kein automatischer
-  Netzwerkverkehr)
-- **Desktop-Notification** bei neuem Report (`notify-send`)
+  Meldungen) plus ein lokaler, editierbarer Wissensspeicher (`knowledge.md`),
+  der beim Start um fehlende Vorlagen-Sektionen ergänzt wird. Aus der App
+  geht kein Netzwerkverkehr raus, nachgeschlagen wird nur, wenn du auf
+  "Im Browser suchen" drückst.
 
 ## Schnellstart
 
+Voraussetzungen: Rust (Toolchain ist gepinnt, siehe `rust-toolchain.toml`),
+die systemd-Dev-Dateien (Arch: `sudo pacman -S systemd-libs`) und für die
+Benachrichtigungen `notify-send` aus libnotify. Ohne libnotify läuft alles,
+nur eben still.
+
 ```sh
-# Voraussetzungen: Rust, systemd-libs (Arch: sudo pacman -S systemd-libs)
 cargo build --release
-
-# 1) GUI starten:
 cargo run --release -p crashmon-gui
-
-# 2) Im Fenster: „Daemon starten"
-# 3) Einen Crash erzeugen (zweites Terminal):
-ulimit -c unlimited
-sh -c 'kill -SEGV $$'
-# 4) Nach wenigen Sekunden erscheint der Report live in der Liste (+ Notification)
 ```
 
-Ohne GUI (Daemon direkt):
+Der Daemon startet automatisch mit der GUI. Steht in der Statusleiste eine
+PID, läuft er.
+
+Zum Ausprobieren einen echten Crash erzeugen:
+
+```sh
+cat /proc/sys/kernel/core_pattern    # muss auf systemd-coredump zeigen
+ulimit -c unlimited
+sh -c 'kill -SEGV $$'
+```
+
+Der Report erscheint in der Liste, sobald systemd-coredump den Eintrag ins
+Journal geschrieben hat. Das dauert je nach Systemlast bis zu 20 Sekunden,
+also nicht zu früh aufgeben. Zeigt `core_pattern` auf etwas anderes als
+systemd-coredump, entsteht zwar ein Crash, aber kein Journal-Eintrag, und
+damit auch kein Report.
+
+Ohne GUI, nur der Daemon:
 
 ```sh
 cargo run --release --bin crashmon -- --config config.example.toml --dump-dir /tmp/crashmon
 ```
 
-Zwei Daemon-Instanzen auf demselben `dump_dir` sind durch `flock`
-(`.lock`) ausgeschlossen — die zweite bricht mit klarer Meldung ab.
+Zwei Daemon-Instanzen auf demselben `dump_dir` schließt ein `flock` auf
+`.lock` aus, die zweite bricht mit einer klaren Meldung ab.
 
-Alle Daten liegen unter `~/.local/share/crashmon/`:
-`crash-<ts>.json` (Reports), `config.toml`, `crashmon-daemon.log`,
-`knowledge.md` (Wissensspeicher).
+Alle Daten liegen unter `~/.local/share/crashmon/`: die Reports als
+`crash-<ts>.json`, dazu `config.toml`, `crashmon-daemon.log` und
+`knowledge.md`.
 
 ## So funktioniert es
 
@@ -86,94 +96,83 @@ Uevents (Netlink, WEDGED) ──────────────────
                                     crash-<ts>.json (atomar, µs-UTC)
 ```
 
-- **Journal** wird über den sd-journal-FD gelesen (epoll-Park, kein Polling);
-  Cursor-Persistenz überlebt Neustarts, periodisches Re-Open heilt
-  Journal-Rotationen; ein amdgpu-Hang mit 20–50 Kernelzeilen wird in einem
-  Rutsch abgearbeitet (Budget + `yield_now`, kein 2-Einträge-pro-Minute-Tröpfeln)
-- **GUI** zeigt die Reports formatiert (nicht rohes JSON) mit Referenz;
-  Scan/Lesefestplatte sind entprellt (500 ms) und parsen bekannte Reports
-  gar nicht erst neu
-- **Im Browser suchen**: unbekannter Xid-Code → `xdg-open` mit
-  vorformulierter Suche; du entscheidest, was in `knowledge.md` wandert
+Das Journal wird über den sd-journal-FD gelesen, per epoll geparkt statt
+gepollt. Der Cursor wird persistiert und überlebt Neustarts, ein
+periodisches Re-Open heilt Journal-Rotationen. Ein amdgpu-Hang schreibt 20
+bis 50 Kernelzeilen auf einmal, die in einem Rutsch abgearbeitet werden
+(Budget plus `yield_now`), statt in zwei Einträgen pro Minute zu tröpfeln.
+
+Die GUI hält sich zurück: Scannen und Lesen sind auf 500 ms entprellt, und
+bereits bekannte Reports werden gar nicht erst neu geparst.
 
 ## GUI im Detail
 
 | Bereich | Funktion |
 |---|---|
-| Kopf | Daemon starten/stoppen (SIGTERM = sauberer Shutdown mit Drain+Flush), Log + Wissensspeicher umschalten |
-| Links | Report-Liste (neueste oben, Severity-Punkt, „vor X Min", Filter), Rechtsklick löscht einen Report |
-| Mitte | Detail: Event-Felder (Grid), JSON kopieren, Referenz (Severity + Erklärung, farbig), „Im Browser suchen" bei unbekannten Xids |
-| Unten | Status-Leiste (immer sichtbar); Daemon-Log aufklappbar |
-| Extra | Wissensspeicher in eigenem Fenster („Neu laden" bei externer Bearbeitung) |
+| Kopf | Daemon starten und stoppen (SIGTERM, also sauberer Shutdown mit Drain und Flush), Log und Wissensspeicher umschalten |
+| Links | Report-Liste, neueste oben, mit Severity-Punkt, "vor X Min" und Filter. Rechtsklick löscht einen Report |
+| Mitte | Detail: alle Event-Felder, JSON kopieren, Referenz mit Severity und Erklärung, bei unbekannten Xids "Im Browser suchen" |
+| Unten | Statusleiste, immer sichtbar. Daemon-Log aufklappbar |
+| Extra | Wissensspeicher in einem eigenen Fenster, mit "Neu laden" für externe Änderungen |
 
-Fenster schließen bei laufendem Daemon → Daemon wird sauber mitbeendet
-(kein Waisen-Prozess); die Fenstergröße wird gemerkt. Neue Reports lösen
-eine Desktop-Notification aus (via `notify-send`, sonst still deaktiviert).
-Vulkan-Warnung (`radv is not a conformant...`) beim Start ist auf AMD
-normal und harmlos.
+Die Fenstergröße wird gemerkt. Die Vulkan-Warnung beim Start
+(`radv is not a conformant...`) ist auf AMD normal und harmlos.
 
 ## Tray-Modus
 
-Die GUI versteckt sich beim Fenster-Schließen ins Systemtray (StatusNotifierItem)
-und überwacht weiterhin den Report-Ordner. Beenden nur über das Tray-Menü.
+Beim Schließen des Fensters verschwindet die GUI ins Systemtray
+(StatusNotifierItem) und überwacht den Report-Ordner weiter. Beendet wird
+über das Tray-Menü.
 
-- KDE Plasma/COSMIC: funktioniert out of the box.
-- GNOME: AppIndicator-Extension erforderlich.
-- Wayland: Fenster-X minimiert die GUI (wirklich unsichtbar machen kann kein
-  Toolkit auf Wayland — winit `set_visible` ist dort unsupported); wieder
-  öffnen per Klick aufs Taskbar-Icon oder das Tray-Menü „Fenster anzeigen"
-  (letzteres nur auf X11 wirksam — Wayland kennt kein „unminimize").
-- Ohne StatusNotifierHost startet die GUI ohne Tray — Fenster-X beendet die App
-  wie gewohnt.
-- Der Daemon startet automatisch mit der GUI; läuft bereits ein externer Daemon
-  (z. B. systemd-Unit), zeigt die GUI das und startet keinen zweiten.
-- Stirbt die GUI ungeordnet (kill -9, Logout), beendet der Kernel den Daemon
-  über PDEATHSIG (SIGTERM → Drain + Flush).
+- KDE Plasma und COSMIC: funktioniert direkt.
+- GNOME: braucht die AppIndicator-Extension.
+- Wayland: das Fenster wird minimiert, nicht wirklich versteckt. Kein
+  Toolkit kann das dort, `set_visible` ist in winit unter Wayland nicht
+  unterstützt. Zurück kommst du über das Taskbar-Icon. Der Menüpunkt
+  "Fenster anzeigen" wirkt nur auf X11, weil Wayland kein Unminimize kennt.
+- Ohne StatusNotifierHost startet die GUI ohne Tray, dann beendet das
+  Fenster-X die App wie gewohnt.
+- Läuft bereits ein Daemon auf demselben `dump_dir`, zum Beispiel über die
+  systemd-Unit, erkennt die GUI das und startet keinen zweiten.
+- Stirbt die GUI ungeordnet, etwa durch `kill -9` oder Logout, beendet der
+  Kernel den Daemon per PDEATHSIG mit SIGTERM. Es bleibt kein Waisenprozess
+  zurück.
 
-## Wissensspeicher & Nachschlagen
+## Wissensspeicher
 
-- **Repo-Vorlage** `crashmon-gui/knowledge.md`: versionierbar, editierbar;
-  beim Bauen eingebettet
-- **Laufzeit-Instanz** `~/.local/share/crashmon/knowledge.md`: deine
-  Einträge; wird **nie überschrieben**, aber automatisch um fehlende
-  Vorlagen-Sektionen **erweitert** (Merge beim Start / „Neu laden")
-- Neue Xid-Codes, Signale, Meldungen einfach selbst eintragen, die GUI
-  zeigt sie sofort
-- Bei unbekannten Xids: „Im Browser suchen" (vorformulierte Query, kein
-  automatischer Netzwerkverkehr aus der App)
-- Community: Inhalte per Pull-Request gegen die Repo-Datei teilen
-  (Format-Regeln: CONTRIBUTING.md)
+Es gibt zwei Dateien. `crashmon-gui/knowledge.md` liegt im Repo, ist
+versionierbar und wird beim Bauen eingebettet.
+`~/.local/share/crashmon/knowledge.md` ist deine Kopie, sie wird nie
+überschrieben, sondern beim Start nur um Sektionen ergänzt, die in der
+Vorlage neu dazugekommen sind.
 
-## Testrezepte (Verifikation)
+Neue Xid-Codes, Signale oder Meldungen trägst du einfach selbst ein, die GUI
+zeigt sie sofort. Wenn du etwas herausgefunden hast, das anderen hilft:
+Pull-Request gegen die Repo-Datei, die Format-Regeln stehen in
+CONTRIBUTING.md.
 
-Alle Crashes sind deterministisch; die ersten drei laufen unprivilegiert.
+## Verifikation
 
-**1. Coredump (E2E):**
+Der Coredump-Pfad lässt sich unprivilegiert komplett durchtesten:
+
 ```sh
 cargo run -- --config config.example.toml --dump-dir /tmp/crashmon &
 ulimit -c unlimited && sh -c 'kill -SEGV $$'
 sleep 30; ls /tmp/crashmon/crash-*.json
 ```
-Hinweis: systemd-coredump kann den Journal-Eintrag lastabhängig um
-10–20 s verzögern; Wartezeiten großzügig wählen.
 
-**2. OOM-Killer:** Kern-Zeilen sind nicht ohne Root injizierbar; der
-Matcher ist via `tests/matcher_test.rs` deterministisch abgedeckt; reale
-Zeilen erscheinen automatisch als `OomKill`-Reports.
+OOM-Kills, Xids und Wedge-Events kann man nicht ohne Weiteres von Hand
+auslösen, die Zeilen kommen nur vom Kernel selbst. Die Matcher dafür sind
+über Fixtures abgedeckt (`tests/matcher_test.rs`, `tests/uevent_test.rs`);
+Details dazu in CONTRIBUTING.md. Ob dein System reale Xids meldet, siehst du
+mit:
 
-**3. NVIDIA-Xid:** ebenso kernel-only; erkennbare reale Zeilen:
 ```sh
 journalctl _TRANSPORT=kernel | grep -i "NVRM: Xid"
 ```
 
-**4. WEDGED-Uevent:** nicht deterministisch testbar — `udevadm trigger
---property-match` filtert nur (kein Gerät hat ein `WEDGED`-Property,
-also passiert nichts), und der Kernel akzeptiert keine Custom-Properties
-per sysfs-Uevent-Write (EINVAL). Echte Wedge-Events kommen nur vom
-xe-Treiber; der Parser ist über `tests/uevent_test.rs` + den
-`xe ... as wedged`-Journal-Fixture abgedeckt.
+Als Systemdienst, ohne GUI:
 
-**5. Service-Unit (Produktiv):**
 ```sh
 sudo useradd --system --home /var/lib/crashmon --shell /usr/sbin/nologin crashmon
 sudo cp systemd/crashmon.service /etc/systemd/system/
@@ -183,7 +182,8 @@ sudo systemctl daemon-reload && sudo systemctl enable --now crashmon
 
 ## Report-Format
 
-`crash-<ts>.json` (ts = UTC-µs der Ursache), atomar geschrieben:
+`crash-<ts>.json`, wobei `ts` die UTC-Mikrosekunden der Ursache sind. Die
+Datei wird atomar geschrieben.
 
 ```json
 {
@@ -194,25 +194,25 @@ sudo systemctl daemon-reload && sudo systemctl enable --now crashmon
 }
 ```
 
-`cause` = frühester Event der Gruppe (T0-Prinzip), `related` = beigeordnete
-(Folge-Xids, korrelierte Coredumps), `lost_events` = kumulative Verluste
-durch Kanal-Überlauf seit Start.
+`cause` ist das früheste Ereignis der Gruppe (T0-Prinzip), `related` sind die
+beigeordneten (Folge-Xids, korrelierte Coredumps), und `lost_events` zählt
+kumulativ, wie viele Ereignisse seit dem Start durch Kanal-Überlauf verloren
+gingen.
 
-## Build & Test
+## Build und Test
 
 ```sh
-cargo build          # Daemon (Binary: crashmon; Workspace-Default)
+cargo build                  # Daemon (Binary: crashmon, Workspace-Default)
 cargo build -p crashmon-gui
-cargo test           # Daemon-Tests
-cargo test -p crashmon-gui   # GUI-Tests (headless inkl. Klick-Smoke)
+cargo test                   # Daemon-Tests
+cargo test -p crashmon-gui   # GUI-Tests, headless inklusive Klick-Smoke
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Toolchain ist in `rust-toolchain.toml` gepinnt (1.95.0, MSRV des
-Workspace — egui/eframe 0.36 verlangt >= 1.95).
+Tests, die ein echtes Journal und systemd-coredump brauchen, laufen nur auf
+Anforderung:
 
-Host-Tests (brauchen echtes Journal + systemd-coredump):
 ```sh
 cargo test --test e2e_test -- --ignored --nocapture
 cargo test --test journal_smoke -- --ignored --nocapture
@@ -222,39 +222,49 @@ cargo test --test journal_smoke -- --ignored --nocapture
 
 ```
 src/                  Daemon (lib + Binary)
-  daemon.rs           Loops + Shutdown-Sequenz + Journal-Re-Open
-  ingest/             Journal-Ingestion (Cursor-Persistenz)
-  gpu/                Matcher (Xid/OOM/Reset) + Uevent-Listener
+  daemon.rs           Loops, Shutdown-Sequenz, Journal-Re-Open
+  ingest/             Journal-Ingestion mit Cursor-Persistenz
+  gpu/                Matcher (Xid, OOM, Reset) + Uevent-Listener
   aggregate.rs        Korrelation + Backpressure
   output.rs           JSON-Report-Writer (atomar)
 crashmon-gui/         GUI (egui/eframe, eigenes Workspace-Crate)
-  src/                app, state (Prozess-Lifecycle), scan, format,
-                      logtail, reference (Wissensbasis)
+  src/                app, state (Prozess-Lifecycle), tray, scan,
+                      format, logtail, config, reference
   knowledge.md        Wissensspeicher-Vorlage (versionierbar)
 systemd/              Gehärtete Service-Unit
 openspec/specs/       Capability-Spezifikationen (SDD)
 ```
 
-Benötigt libsystemd-Dev-Dateien (`libsystemd-sys` via pkg-config; auf Arch:
-Paket `systemd-libs`).
+## Grenzen
 
-## Aktive Entwicklung
+- systemd-coredump kann den Journal-Eintrag je nach Last um bis zu 20
+  Sekunden verzögern. Der Report kommt dann eben später.
+- Unbekannte Xid-Codes werden nicht geraten. Wenn es keine gesicherte Quelle
+  gibt, bleibt der Eintrag leer, und du bekommst stattdessen den Knopf zum
+  Nachschlagen.
+- Ohne libnotify gibt es keine Desktop-Benachrichtigung, dann ist die
+  GUI-Liste die einzige Meldung.
 
-Dieses Projekt wird aktiv weiterentwickelt: Software, die stehen bleibt,
-veraltet. Geplante/regelmäßige Arbeit:
+## Warum ich das teile
 
-- Neue Fehlermuster und Xid-Codes in der Wissensbasis (auch aus eigenen
-  Crashes, die das Tool dokumentiert)
-- Treiber-/Kernel-Entwicklungen verfolgen (neue Wedged-Methoden, neue
-  Fehlermeldungen)
-- Community-Beiträge: Issues, Pull-Requests und Wissensdatei-Erweiterungen
-  sind willkommen
+Ich habe Abstürze auf meinem eigenen Rechner lange schlicht übersehen. Nicht
+weil es keine Spuren gab, sondern weil die Spuren im Journal liegen, und das
+Journal ist unübersichtlich. Man muss vorher wissen, wonach man sucht, um es
+zu finden. Wenn ich die Zeile dann irgendwann hatte, stand da ein Code, eine
+Zahl, ein Signalname, und ich war genauso schlau wie vorher. Also googeln,
+Forenthreads von 2019, Treiber-Quelltext, halbe Antworten.
 
-## Bekannte Grenzen
+crashmon ist aus dieser Reihenfolge entstanden: erst wissen, dass überhaupt
+etwas passiert ist, dann verstehen, was. Der Daemon sucht die Zeilen, die
+Referenz erklärt sie, und was die Referenz nicht kennt, landet in einer
+Wissensdatei, die ich selbst weiterschreiben kann.
 
-- systemd-coredump kann den Journal-Eintrag eines Crashes lastabhängig um
-  10–20 s verzögern; Reports erscheinen entsprechend später
-- Desktop-Notifications brauchen `notify-send` (libnotify); ohne das Tool
-  ist nur die GUI die Benachrichtigung
-- Unbekannte Xid-Codes ohne gesicherte Quelle werden bewusst nicht
-  erraten; sie bleiben dem Browser-Nachschlagen oder dir überlassen
+Öffentlich ist es, weil genau dieses Wissen verstreut ist. Es steht in
+Foren, in Kernel-Quellen, in den Köpfen von Leuten, die dasselbe Problem
+schon hatten. Eine Wissensdatei im Repo, in die andere per Pull-Request
+schreiben können, arbeitet dagegen. Jeder Eintrag, den jemand hinzufügt,
+erspart dem Nächsten den Abend, den ich hatte.
+
+Das Projekt ist in aktiver Arbeit. Es wird Fehler geben, und es fehlen mit
+Sicherheit Fehlermuster, die ich noch nie gesehen habe. Issues und
+Pull-Requests sind willkommen, besonders die mit echten Log-Zeilen darin.
