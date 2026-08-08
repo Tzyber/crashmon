@@ -22,7 +22,7 @@ was der Fehler bedeutet. Bei neuen Reports kommt eine Desktop-Notification.
 Bei unbekannten Fehlern öffnet ein Knopf die vorformulierte Suche im Browser,
 und was du herausfindest, kannst du in deinen Wissensspeicher schreiben.
 
-![Die crashmon-GUI mit zwei Reports: links die Liste, rechts die Detailansicht eines SIGABRT mit Programmpfad, Signal, Core-Datei und Erklaerung](docs/images/gui-report.png)
+![Die crashmon-GUI mit zwei Reports: links die Liste, rechts die Detailansicht eines SIGABRT mit Programmpfad, Signal, Core-Datei und Erklaerung](Docs/images/gui-report.png)
 
 ## Was es kann
 
