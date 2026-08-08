@@ -22,7 +22,7 @@ was der Fehler bedeutet. Bei neuen Reports kommt eine Desktop-Notification.
 Bei unbekannten Fehlern öffnet ein Knopf die vorformulierte Suche im Browser,
 und was du herausfindest, kannst du in deinen Wissensspeicher schreiben.
 
-![Die crashmon-GUI mit zwei Reports: links die Liste, rechts die Detailansicht eines SIGABRT mit Programmpfad, Signal, Core-Datei und Erklaerung](Docs/images/gui-report.png)
+![Die crashmon-GUI mit zwei Reports: links die Liste, rechts die Detailansicht eines SIGABRT mit Programmpfad, Signal, Core-Datei und Erklaerung](Docs/error1_program.png)
 
 ## Was es kann
 
@@ -254,7 +254,7 @@ weil es keine Spuren gab, sondern weil die Spuren im Journal liegen, und das
 Journal ist unübersichtlich. Man muss vorher wissen, wonach man sucht, um es
 zu finden. So sieht ein einzelner Absturz dort aus:
 
-![journalctl-Ausgabe im verbose-Format: ein einzelner Coredump als seitenlange Liste von Feldern](docs/images/journal-verbose.png)
+![journalctl-Ausgabe im verbose-Format: ein einzelner Coredump als seitenlange Liste von Feldern](Docs/error_shell.png)
 
 Wenn ich die Zeile dann irgendwann hatte, stand da ein Code, eine Zahl, ein
 Signalname, und ich war genauso schlau wie vorher. Also googeln,
