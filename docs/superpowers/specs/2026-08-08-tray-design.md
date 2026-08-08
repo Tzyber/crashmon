@@ -34,15 +34,20 @@ beim GUI-Start automatisch.
 - **Tray-Verlust zur Laufzeit** (D-Bus-Neustart, Host-Wegfall): der
   Relevanzfall ist hidden + stabiler Daemon + keine Reports — tagelang
   keine Zustandsflanke. `update()`-Fehler reicht als Erkennung nicht
-  (setzt Flanke voraus, die nie kommt). Stattdessen **Liveness-Check:
-  `Handle::is_closed()` alle 2 s** (lokaler Flag, kein D-Bus-Roundtrip;
-  nicht im 500-ms-Tick). Bei `true`:
-  - `tray_active = false`
-  - **wenn `hidden`: `Visible(true)`** — einzige Reaktion, die den
-    Prozess wieder erreichbar macht (Statuszeile im versteckten Fenster
-    sieht niemand)
+  (setzt Flanke voraus, die nie kommt). **Nativer ksni-Mechanismus statt
+  Poll:** `Tray::watcher_offline(reason)` feuert im D-Bus-Thread, wenn
+  der `org.kde.StatusNotifierWatcher` offline geht (verifiziert in
+  ksni-0.3.6-Doku; `watcher_online` nur nach offline). Callback macht nur
+  Sender-Push (`TrayCmd::TrayLost`/`TrayBack`), Rückgabe `true` (Service
+  weiterlaufen lassen). GUI-Thread:
+  - `TrayLost`: `tray_active = false`, **wenn `hidden`: `Visible(true)`**
+    — einzige Reaktion, die den Prozess wieder erreichbar macht
+    (Statuszeile im versteckten Fenster sieht niemand)
   - Statuszeile „Tray verloren — Fenster wieder gezeigt, X beendet die
-    App"
+    App"; `TrayBack`: `tray_active = true`
+  - Ein `Handle::is_closed()`-Poll ist NICHT der richtige Mechanismus:
+    „Handle geschlossen" ≠ „Host verschwunden" (Verbindung kann auf einen
+    neuen Host warten)
 - **Bekanntes Risiko:** `Handle::update()` ist blockierend (D-Bus-
   Roundtrip). Hängt der Bus (Host tot, Verbindung offen), hängt der
   GUI-Thread mit — im Hidden-Zustand unsichtbar. Kein Timeout drumherum
