@@ -49,18 +49,20 @@ fn pdeathsig_killt_kind_beim_parent_tod() {
     let _ = helper.wait();
 
     // Kind muss innerhalb des Timeouts sterben. Timeout-Pfad raeumt auf:
-    // SIGKILL + wait (sonst verfaelscht ein ueberlebendes Kind den naechsten
-    // Lauf / haelt Ressourcen).
+    // SIGKILL (ein ueberlebendes Kind verfaelscht den naechsten Lauf /
+    // haelt Ressourcen). Kill VOR dem assert: Unwind durch assert-Panic
+    // wuerde den Cleanup ueberspringen (verwaistes sleep 120).
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut timed_out = false;
     while pid_alive(kind_pid) {
-        assert!(
-            Instant::now() < deadline,
-            "PDEATHSIG feuerte nicht (Timeout) — Kind-PID {kind_pid} lebt"
-        );
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
-    // Cleanup: falls doch noch lebend (assert uebersprungen?), killen.
     if pid_alive(kind_pid) {
         unsafe { libc::kill(kind_pid as libc::pid_t, libc::SIGKILL) };
     }
+    assert!(!timed_out, "PDEATHSIG feuerte nicht (Timeout) — Kind-PID {kind_pid} lebt");
 }
